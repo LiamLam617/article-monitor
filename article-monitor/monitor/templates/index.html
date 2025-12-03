@@ -1,0 +1,1983 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文章阅读数监测</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #f5f5f5;
+            padding: 0;
+            margin: 0;
+        }
+        
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .header {
+            background: white;
+            padding: 16px 24px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            margin-bottom: 20px;
+        }
+        
+        h1 {
+            color: #333;
+            font-size: 20px;
+            font-weight: 600;
+            margin: 0;
+        }
+        
+        /* 标签页导航 */
+        .tab-navigation {
+            display: flex;
+            gap: 0;
+            border-bottom: 1px solid #e8e8e8;
+            background: white;
+            padding: 0 24px;
+            margin-bottom: 20px;
+        }
+        
+        .tab-item {
+            padding: 12px 24px;
+            cursor: pointer;
+            border: none;
+            background: none;
+            color: #666;
+            font-size: 14px;
+            position: relative;
+            transition: color 0.3s;
+        }
+        
+        .tab-item:hover {
+            color: #333;
+        }
+        
+        .tab-item.active {
+            color: #ff6b35;
+            font-weight: 500;
+        }
+        
+        .tab-item.active::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: #ff6b35;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        .add-article {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .form-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        
+        input[type="text"] {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        button {
+            padding: 10px 20px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        button:hover {
+            background: #0056b3;
+        }
+        
+        button:disabled {
+            background: #cccccc;
+            color: #666666;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+        
+        button.secondary {
+            background: #6c757d;
+        }
+        
+        button.secondary:disabled {
+            background: #999999;
+        }
+        
+        .articles-list {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .site-group {
+            border-bottom: 2px solid #e0e0e0;
+        }
+        
+        .site-group:last-child {
+            border-bottom: none;
+        }
+        
+        .site-header {
+            background: #f8f9fa;
+            padding: 12px 20px;
+            font-weight: 600;
+            color: #495057;
+            font-size: 14px;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            cursor: pointer;
+            user-select: none;
+        }
+        
+        .site-header:hover {
+            background: #e9ecef;
+        }
+        
+        .site-name {
+            flex: 1;
+        }
+        
+        .site-count {
+            font-size: 12px;
+            color: #6c757d;
+            font-weight: normal;
+        }
+        
+        .site-toggle {
+            width: 20px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: transform 0.2s;
+        }
+        
+        .site-group.collapsed .site-toggle {
+            transform: rotate(-90deg);
+        }
+        
+        .article-group {
+            border-left: 3px solid #007bff;
+            max-height: 5000px;
+            transition: max-height 0.3s ease-out;
+            overflow: hidden;
+        }
+        
+        .site-group.collapsed .article-group {
+            max-height: 0;
+            transition: max-height 0.3s ease-in;
+        }
+        
+        .article-item {
+            padding: 15px 20px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .article-item:last-child {
+            border-bottom: none;
+        }
+        
+        .article-group {
+            border-left: 3px solid #007bff;
+        }
+        
+        .article-info {
+            flex: 1;
+        }
+        
+        .article-title {
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .article-url {
+            color: #666;
+            font-size: 12px;
+            word-break: break-all;
+        }
+        
+        .article-stats {
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            margin-left: 20px;
+        }
+        
+        .read-count {
+            font-size: 18px;
+            font-weight: bold;
+            color: #007bff;
+        }
+        
+        .article-actions {
+            display: flex;
+            gap: 10px;
+        }
+        
+        .btn-small {
+            padding: 5px 10px;
+            font-size: 12px;
+        }
+        
+        .chart-container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+        }
+        
+        .error {
+            color: #dc3545;
+            padding: 10px;
+            background: #f8d7da;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        
+        .success {
+            color: #155724;
+            padding: 10px;
+            background: #d4edda;
+            border-radius: 4px;
+            margin: 10px 0;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .settings-panel {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .settings-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #333;
+        }
+        
+        .settings-row {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .settings-label {
+            min-width: 120px;
+            color: #666;
+        }
+        
+        input[type="number"] {
+            width: 100px;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        .settings-hint {
+            font-size: 12px;
+            color: #999;
+        }
+        
+        .overview-chart {
+            background: white;
+            padding: 24px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+        
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+        
+        .chart-title-section {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+        }
+        
+        .chart-title {
+            font-size: 16px;
+            font-weight: 500;
+            color: #333;
+        }
+        
+        
+        .chart-controls {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        
+        .time-range-btn {
+            padding: 6px 12px;
+            border: 1px solid #ddd;
+            background: #e0e0e0;  /* 灰色背景 */
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+        
+        .time-range-btn.active {
+            background: #6c757d;  /* 深灰色激活状态 */
+            color: white;
+            border-color: #6c757d;
+        }
+        
+        .time-range-btn:hover {
+            background: #d0d0d0;
+        }
+        
+        .time-range-btn.active:hover {
+            background: #5a6268;
+        }
+        
+        .date-range {
+            font-size: 13px;
+            color: #999;
+            padding: 6px 12px;
+            background: #f8f8f8;
+            border-radius: 4px;
+        }
+        
+        .date-range-selector {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        
+        .custom-date-btn {
+            padding: 6px 16px;
+            background: white;
+            color: #666;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        
+        .custom-date-btn:hover {
+            border-color: #ff6b35;
+            color: #ff6b35;
+        }
+        
+        #startDate, #endDate {
+            padding: 6px 12px;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 13px;
+            color: #666;
+        }
+        
+        #dateSeparator {
+            color: #999;
+            font-size: 13px;
+        }
+        
+        /* 导出按钮 */
+        .export-btn {
+            padding: 6px 16px;
+            background: #52c41a;
+            color: white;
+            border: 1px solid #52c41a;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+        
+        .export-btn:hover {
+            background: #389e0d;
+            border-color: #389e0d;
+        }
+        
+        /* 导出菜单 */
+        .export-menu {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: white;
+            padding: 24px;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            z-index: 1000;
+            min-width: 400px;
+            display: none;
+        }
+        
+        .export-menu.active {
+            display: block;
+        }
+        
+        .export-menu-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 999;
+            display: none;
+        }
+        
+        .export-menu-overlay.active {
+            display: block;
+        }
+        
+        .export-menu-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .export-menu-close {
+            cursor: pointer;
+            font-size: 24px;
+            color: #999;
+            line-height: 1;
+        }
+        
+        .export-menu-close:hover {
+            color: #333;
+        }
+        
+        .export-option {
+            padding: 12px 16px;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            margin-bottom: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .export-option:hover {
+            border-color: #52c41a;
+            background: #f6ffed;
+        }
+        
+        .export-option-icon {
+            font-size: 24px;
+        }
+        
+        .export-option-text {
+            flex: 1;
+        }
+        
+        .export-option-title {
+            font-size: 14px;
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 4px;
+        }
+        
+        .export-option-desc {
+            font-size: 12px;
+            color: #999;
+        }
+        
+        .chart-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            user-select: none;
+        }
+        
+        .legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 3px;
+        }
+        
+        .legend-item.disabled .legend-color {
+            opacity: 0.3;
+        }
+        
+        .legend-item.disabled .legend-label {
+            opacity: 0.5;
+        }
+        
+        .legend-label {
+            font-size: 13px;
+            color: #333;
+        }
+        
+        #overviewChartCanvas {
+            max-height: 450px;
+        }
+        
+        /* 图表工具提示 */
+        .chart-tooltip {
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 12px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+        
+        /* 数据卡片 */
+        .data-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+        
+        .data-card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+        }
+        
+        .data-card-title {
+            font-size: 13px;
+            color: #999;
+            margin-bottom: 8px;
+        }
+        
+        .data-card-value {
+            font-size: 28px;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .data-card-trend {
+            font-size: 12px;
+            margin-top: 8px;
+        }
+        
+        .data-card-trend.up {
+            color: #52c41a;
+        }
+        
+        .data-card-trend.down {
+            color: #ff4d4f;
+        }
+        
+        .article-item.in-chart {
+            background: #f0f8ff;
+        }
+        
+        .article-item.in-chart .read-count {
+            color: #007bff;
+            font-weight: bold;
+        }
+        
+        .cache-panel {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #e0e0e0;
+        }
+        
+        .progress-panel {
+            background: white;
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            display: none;
+        }
+        
+        .progress-panel.active {
+            display: block;
+        }
+        
+        .progress-bar-container {
+            width: 100%;
+            height: 20px;
+            background: #e0e0e0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        
+        .progress-bar {
+            height: 100%;
+            background: #007bff;
+            transition: width 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 12px;
+        }
+        
+        .progress-info {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            color: #666;
+            margin-top: 5px;
+        }
+        
+        .progress-url {
+            font-size: 12px;
+            color: #999;
+            margin-top: 5px;
+            word-break: break-all;
+        }
+        
+        input[type="date"] {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        .date-range-selector {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-left: 10px;
+        }
+        
+        .custom-date-btn {
+            padding: 6px 12px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        .custom-date-btn:hover {
+            background: #f0f0f0;
+        }
+        
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 文章数据监测平台</h1>
+    </div>
+    
+    <div class="tab-navigation">
+        <button class="tab-item active" data-tab="trend" onclick="switchTab('trend')">
+            📈 趋势图
+        </button>
+        <button class="tab-item" data-tab="list" onclick="switchTab('list')">
+            📋 数据列表
+        </button>
+    </div>
+    
+    <div class="container">
+        
+        <div class="settings-panel">
+            <div class="settings-title">⚙️ 定时爬取设置</div>
+            <div class="settings-row">
+                <label class="settings-label">爬取间隔：</label>
+                <input type="number" id="intervalHours" min="1" value="6">
+                <span>小时</span>
+                <button onclick="updateSettings()">保存设置</button>
+                <span class="settings-hint">（当前：每 <span id="currentInterval">6</span> 小时自动爬取一次）</span>
+            </div>
+        </div>
+        
+        <div class="progress-panel" id="progressPanel">
+            <div class="settings-title">🔄 爬取进度</div>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progressBar" style="width: 0%;">0%</div>
+            </div>
+            <div class="progress-info">
+                <span id="progressText">准备中...</span>
+                <span id="progressStats"></span>
+            </div>
+            <div class="progress-url" id="progressUrl"></div>
+        </div>
+        
+        <!-- 趋势图标签页 -->
+        <div class="tab-content active" id="trendTab">
+            <!-- 数据概览卡片 -->
+            <div class="data-cards" id="dataCards">
+                <div class="data-card">
+                    <div class="data-card-title">总文章数</div>
+                    <div class="data-card-value" id="totalArticles">0</div>
+                </div>
+                <div class="data-card">
+                    <div class="data-card-title">总阅读量</div>
+                    <div class="data-card-value" id="totalReads">0</div>
+                    <div class="data-card-trend up" id="readsTrend"></div>
+                </div>
+                <div class="data-card">
+                    <div class="data-card-title">平均阅读量</div>
+                    <div class="data-card-value" id="avgReads">0</div>
+                </div>
+                <div class="data-card">
+                    <div class="data-card-title">最高阅读量</div>
+                    <div class="data-card-value" id="maxReads">0</div>
+                </div>
+            </div>
+            
+            <div class="overview-chart" id="overviewChart">
+                <div class="chart-header">
+                    <div class="chart-title-section">
+                        <div class="chart-title">趋势分析</div>
+                    </div>
+                    <div class="chart-controls">
+                        <button class="time-range-btn" data-days="0" onclick="changeTimeRange(0)">今天</button>
+                        <button class="time-range-btn active" data-days="7" onclick="changeTimeRange(7)">7天</button>
+                        <button class="time-range-btn" data-days="30" onclick="changeTimeRange(30)">30天</button>
+                        <button class="time-range-btn" data-days="90" onclick="changeTimeRange(90)">90天</button>
+                        <div class="date-range-selector">
+                            <button class="custom-date-btn" onclick="toggleCustomDate()">自定义</button>
+                            <input type="date" id="startDate" style="display: none;" onchange="updateCustomDateRange()">
+                            <span style="display: none;" id="dateSeparator">至</span>
+                            <input type="date" id="endDate" style="display: none;" onchange="updateCustomDateRange()">
+                        </div>
+                        <span class="date-range" id="dateRange"></span>
+                        <!-- 导出按钮 -->
+                        <button class="export-btn" onclick="showExportMenu()" title="导出数据">
+                            📊 导出
+                        </button>
+                    </div>
+                </div>
+                <div class="chart-legend" id="chartLegend"></div>
+                <canvas id="overviewChartCanvas"></canvas>
+            </div>
+        </div>
+        
+        <!-- 数据列表标签页 -->
+        <div class="tab-content" id="listTab">
+            <div class="articles-list" id="articlesList">
+                <div class="loading">加载中...</div>
+            </div>
+        </div>
+        
+        <div class="add-article">
+            <div class="form-group" style="flex-direction: column; align-items: flex-start;">
+                <textarea id="articleUrl" placeholder="输入文章链接，每行一个&#10;例如:&#10;https://juejin.cn/post/xxx&#10;https://blog.csdn.net/xxx" rows="4" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; resize: vertical; font-family: inherit; margin-bottom: 10px;"></textarea>
+                <div style="display: flex; gap: 10px;">
+                    <button onclick="addArticle()">批量添加文章</button>
+                    <button class="secondary" id="crawlBtn" onclick="manualCrawl()">手动爬取</button>
+                </div>
+            </div>
+            <div id="errorMsg"></div>
+        </div>
+        
+    </div>
+    
+    <!-- 导出菜单 -->
+    <div class="export-menu-overlay" id="exportMenuOverlay" onclick="hideExportMenu()"></div>
+    <div class="export-menu" id="exportMenu">
+        <div class="export-menu-title">
+            导出数据
+            <span class="export-menu-close" onclick="hideExportMenu()">&times;</span>
+        </div>
+        
+        <div class="export-option" onclick="exportSelectedArticles()">
+            <div class="export-option-icon">📊</div>
+            <div class="export-option-text">
+                <div class="export-option-title">导出已选文章</div>
+                <div class="export-option-desc">导出图表中已选择的文章数据（CSV格式）</div>
+            </div>
+        </div>
+        
+        <div class="export-option" onclick="exportAllArticles()">
+            <div class="export-option-icon">📁</div>
+            <div class="export-option-text">
+                <div class="export-option-title">导出所有文章</div>
+                <div class="export-option-desc">导出所有文章的完整数据（CSV格式）</div>
+            </div>
+        </div>
+        
+        <div class="export-option" onclick="exportCurrentView()">
+            <div class="export-option-icon">📸</div>
+            <div class="export-option-text">
+                <div class="export-option-title">导出当前视图</div>
+                <div class="export-option-desc">导出当前时间范围内的数据（CSV格式）</div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // 注册 Chart.js 数据标签插件
+        if (typeof ChartDataLabels !== 'undefined') {
+            Chart.register(ChartDataLabels);
+        }
+        
+        let overviewChart = null;
+        let currentTimeRange = 7;
+        let currentStartDate = null;
+        let currentEndDate = null;
+        let chartData = null;
+        let selectedArticles = new Set(); // 选中的文章ID集合
+        let articleHistories = {}; // 文章历史数据缓存
+        let progressInterval = null; // 进度轮询定时器
+        let currentTab = 'trend'; // 当前标签页
+        let allArticles = []; // 所有文章数据
+        
+        // 网站名称映射和颜色
+        const siteConfig = {
+            'juejin': { name: '掘金', color: '#1E80FF' },
+            'csdn': { name: 'CSDN', color: '#FC5531' },
+            'cnblog': { name: '博客园', color: '#41A317' },
+            'freebuf': { name: 'FreeBuf', color: '#FF6B35' },
+            '51cto': { name: '51CTO', color: '#FFA500' },
+            'elecfans': { name: '电子发烧友', color: '#FF69B4' },
+            'segmentfault': { name: '思否', color: '#26A69A' },
+            'jinshu': { name: '简书', color: '#EA6F5A' },
+            'eefocus': { name: '与非网', color: '#FF5722' },
+            'MBB': { name: '面包板', color: '#9C27B0' },
+            '其他': { name: '其他', color: '#9E9E9E' }
+        };
+        
+        // 标签页切换
+        function switchTab(tabName) {
+            currentTab = tabName;
+            
+            // 更新标签页按钮状态
+            document.querySelectorAll('.tab-item').forEach(item => {
+                if (item.getAttribute('data-tab') === tabName) {
+                    item.classList.add('active');
+                } else {
+                    item.classList.remove('active');
+                }
+            });
+            
+            // 更新标签页内容显示
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            
+            const tabMap = {
+                'trend': 'trendTab',
+                'list': 'listTab'
+            };
+            
+            document.getElementById(tabMap[tabName]).classList.add('active');
+            
+            // 加载对应标签页的数据
+            if (tabName === 'list') {
+                loadArticles();
+            }
+        }
+        
+        // 更新数据卡片
+        function updateDataCards() {
+            if (!allArticles || allArticles.length === 0) {
+                return;
+            }
+            
+            const totalArticles = allArticles.length;
+            const totalReads = allArticles.reduce((sum, article) => sum + (article.latest_count || 0), 0);
+            const avgReads = totalArticles > 0 ? Math.round(totalReads / totalArticles) : 0;
+            const maxReads = Math.max(...allArticles.map(a => a.latest_count || 0));
+            
+            document.getElementById('totalArticles').textContent = totalArticles.toLocaleString('zh-CN');
+            document.getElementById('totalReads').textContent = totalReads.toLocaleString('zh-CN');
+            document.getElementById('avgReads').textContent = avgReads.toLocaleString('zh-CN');
+            document.getElementById('maxReads').textContent = maxReads.toLocaleString('zh-CN');
+        }
+        
+        // 显示导出菜单
+        function showExportMenu() {
+            document.getElementById('exportMenu').classList.add('active');
+            document.getElementById('exportMenuOverlay').classList.add('active');
+        }
+        
+        // 隐藏导出菜单
+        function hideExportMenu() {
+            document.getElementById('exportMenu').classList.remove('active');
+            document.getElementById('exportMenuOverlay').classList.remove('active');
+        }
+        
+        // 导出已选文章
+        async function exportSelectedArticles() {
+            if (selectedArticles.size === 0) {
+                alert('请先在图表中选择要导出的文章');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/export/csv', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        article_ids: Array.from(selectedArticles),
+                        start_date: currentStartDate,
+                        end_date: currentEndDate
+                    })
+                });
+                
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `selected_articles_${new Date().getTime()}.csv`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    window.URL.revokeObjectURL(url);
+                    hideExportMenu();
+                    showSuccess('导出成功！');
+                } else {
+                    const result = await response.json();
+                    showError('导出失败: ' + (result.error || '未知错误'));
+                }
+            } catch (error) {
+                console.error('导出失败:', error);
+                showError('导出失败: ' + error.message);
+            }
+        }
+        
+        // 导出所有文章
+        async function exportAllArticles() {
+            if (!allArticles || allArticles.length === 0) {
+                alert('当前没有文章数据');
+                return;
+            }
+            
+            try {
+                let url = '/api/export/all-csv?';
+                if (currentStartDate && currentEndDate) {
+                    url += `start_date=${currentStartDate}&end_date=${currentEndDate}`;
+                }
+                
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `all_articles_${new Date().getTime()}.csv`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                hideExportMenu();
+                showSuccess('导出成功！');
+            } catch (error) {
+                console.error('导出失败:', error);
+                showError('导出失败: ' + error.message);
+            }
+        }
+        
+        // 导出当前视图
+        async function exportCurrentView() {
+            if (selectedArticles.size === 0) {
+                // 如果没有选中文章，导出所有文章
+                await exportAllArticles();
+            } else {
+                // 如果有选中文章，导出选中的
+                await exportSelectedArticles();
+            }
+        }
+        
+        // 加载文章列表
+        async function loadArticles() {
+            try {
+                const response = await fetch('/api/articles');
+                const result = await response.json();
+                
+                if (result.success) {
+                    allArticles = result.data; // 保存文章数据
+                    renderArticles(result.data);
+                    updateDataCards(); // 更新数据卡片
+                } else {
+                    showError('加载失败: ' + result.error);
+                }
+            } catch (error) {
+                showError('加载失败: ' + error.message);
+            }
+        }
+        
+        
+        // 渲染文章列表（按网站分组）
+        function renderArticles(articles) {
+            const container = document.getElementById('articlesList');
+            
+            if (articles.length === 0) {
+                container.innerHTML = '<div class="loading">还没有文章，添加一篇试试吧</div>';
+                return;
+            }
+            
+            // 按网站分组
+            const siteGroups = {};
+            articles.forEach(article => {
+                const site = article.site || '其他';
+                if (!siteGroups[site]) {
+                    siteGroups[site] = [];
+                }
+                siteGroups[site].push(article);
+            });
+            
+            // 网站显示名称映射（使用 siteConfig）
+            
+            // 生成HTML
+            let html = '';
+            Object.keys(siteGroups).sort().forEach(site => {
+                const siteArticles = siteGroups[site];
+                const siteDisplayName = siteConfig[site]?.name || site;
+                
+                html += `
+                    <div class="site-group" data-site="${site}">
+                        <div class="site-header" onclick="toggleSiteGroup('${site}')">
+                            <div class="site-toggle">▼</div>
+                            <span class="site-name">${siteDisplayName}</span>
+                            <span class="site-count">${siteArticles.length} 篇文章</span>
+                        </div>
+                        <div class="article-group">
+                            ${siteArticles.map(article => {
+                                const inChart = selectedArticles.has(article.id);
+                                return `
+                                <div class="article-item ${inChart ? 'in-chart' : ''}" data-article-id="${article.id}">
+                                    <div class="article-info">
+                                        <div class="article-title">${escapeHtml(article.title || article.url)}</div>
+                                        <div class="article-url">${escapeHtml(article.url)}</div>
+                                    </div>
+                                    <div class="article-stats">
+                                        <div class="read-count">${(article.latest_count || 0).toLocaleString('zh-CN')}</div>
+                                        <div class="article-actions">
+                                            <button class="btn-small ${inChart ? 'secondary' : ''}" data-action="toggle-chart" data-article-id="${article.id}" data-article-title="${escapeHtml(article.title || article.url)}">
+                                                ${inChart ? '从图表移除' : '添加到图表'}
+                                            </button>
+                                            <button class="btn-small secondary" data-action="delete" data-article-id="${article.id}">删除</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                            }).join('')}
+                        </div>
+                    </div>
+                `;
+            });
+            
+            container.innerHTML = html;
+            
+            // 绑定按钮事件（使用事件委托）
+            container.querySelectorAll('.article-actions button').forEach(button => {
+                button.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const action = this.getAttribute('data-action');
+                    const articleId = parseInt(this.getAttribute('data-article-id'));
+                    
+                    if (action === 'delete') {
+                        deleteArticle(articleId);
+                    } else if (action === 'toggle-chart') {
+                        const articleTitle = this.getAttribute('data-article-title');
+                        toggleArticleInChart(articleId, articleTitle);
+                    }
+                });
+            });
+        }
+        
+        // 添加文章
+        async function addArticle() {
+            const rawInput = document.getElementById('articleUrl').value;
+            const urls = rawInput.split('\n').map(u => u.trim()).filter(u => u);
+            
+            if (urls.length === 0) {
+                showError('请输入文章链接');
+                return;
+            }
+            
+            const btn = document.querySelector('button[onclick="addArticle()"]');
+            const originalText = btn.innerText;
+            btn.innerText = '添加中...';
+            btn.disabled = true;
+            
+            try {
+                const response = await fetch('/api/articles/batch', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({urls: urls})
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    document.getElementById('articleUrl').value = '';
+                    
+                    // 生成结果报告
+                    const results = result.results;
+                    const successCount = results.filter(r => r.success).length;
+                    const failCount = results.filter(r => !r.success).length;
+                    
+                    let message = `处理完成: ${successCount} 成功`;
+                    if (failCount > 0) {
+                        message += `, ${failCount} 失败`;
+                    }
+                    
+                    if (failCount > 0) {
+                        // 显示详细的失败信息
+                        const failures = results.filter(r => !r.success).map(r => `${r.url}: ${r.error}`).join('\n');
+                        alert(`${message}\n\n失败详情:\n${failures}`);
+                    } else {
+                        showSuccess(message);
+                    }
+                    
+                    loadArticles();
+                    // 重新加载统计数据
+                    loadStatistics(currentTimeRange).then(() => {
+                        if (chartData) renderOverviewChart(chartData);
+                    });
+                } else {
+                    showError('添加失败: ' + result.error);
+                }
+            } catch (error) {
+                showError('添加失败: ' + error.message);
+            } finally {
+                btn.innerText = originalText;
+                btn.disabled = false;
+            }
+        }
+        
+        // 删除文章
+        async function deleteArticle(articleId) {
+            if (!articleId) {
+                console.error('删除文章：缺少文章ID');
+                alert('删除失败：缺少文章ID');
+                return;
+            }
+            
+            if (!confirm('确定要删除这篇文章吗？')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/articles/${articleId}`, {
+                    method: 'DELETE'
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP错误: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    // 从选中列表中移除
+                    selectedArticles.delete(articleId);
+                    delete articleHistories[articleId];
+                    
+                    // 重新加载文章列表
+                    await loadArticles();
+                    
+                    // 重新加载统计数据（支持自定义日期范围）
+                    if (currentStartDate && currentEndDate) {
+                        await loadStatistics(null, currentStartDate, currentEndDate);
+                    } else {
+                        await loadStatistics(currentTimeRange || 7);
+                    }
+                    
+                    // 重新加载选中的文章数据并刷新图表
+                    await reloadSelectedArticles();
+                    if (chartData) {
+                        renderOverviewChart(chartData);
+                    }
+                } else {
+                    showError('删除失败: ' + (result.error || '未知错误'));
+                }
+            } catch (error) {
+                console.error('删除文章错误:', error);
+                showError('删除失败: ' + error.message);
+            }
+        }
+        
+        // 切换网站分组展开/收起
+        function toggleSiteGroup(site) {
+            const group = document.querySelector(`[data-site="${site}"]`);
+            if (group) {
+                group.classList.toggle('collapsed');
+            }
+        }
+        
+        // 切换文章在图表中的显示
+        async function toggleArticleInChart(articleId, title) {
+            if (selectedArticles.has(articleId)) {
+                // 从图表移除
+                selectedArticles.delete(articleId);
+                delete articleHistories[articleId];
+            } else {
+                // 添加到图表
+                try {
+                    // 判断是否是今天模式
+                    const isToday = currentStartDate && currentEndDate && currentStartDate === currentEndDate;
+                    
+                    // 加载文章历史数据
+                    let url = `/api/articles/${articleId}/history?limit=1000`;
+                    
+                    // 如果有日期范围，添加到请求中
+                    if (currentStartDate && currentEndDate) {
+                        url += `&start_date=${currentStartDate}&end_date=${currentEndDate}`;
+                        if (isToday) {
+                            url += '&group_by_hour=true';
+                        }
+                    } else if (currentTimeRange) {
+                        // 根据时间范围计算日期
+                        const endDate = new Date();
+                        const startDate = new Date();
+                        startDate.setDate(startDate.getDate() - currentTimeRange + 1);
+                        url += `&start_date=${startDate.toISOString().split('T')[0]}&end_date=${endDate.toISOString().split('T')[0]}`;
+                    }
+                    
+                    const response = await fetch(url);
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        // 允许添加文章，即使当前日期范围没有数据
+                        // 如果没有数据，使用空数组，图表会显示为空白但可以添加
+                        selectedArticles.add(articleId);
+                        articleHistories[articleId] = {
+                            title: title,
+                            data: result.data || [],  // 如果没有数据，使用空数组
+                            site: result.site || '其他'  // 保存平台信息
+                        };
+                        
+                        // 如果数据为空，给出提示但不阻止添加
+                        if (!result.data || result.data.length === 0) {
+                            console.warn(`文章 ${articleId} 在当前日期范围内没有数据`);
+                        }
+                    } else {
+                        showError('加载文章数据失败: ' + (result.error || '未知错误'));
+                        return;
+                    }
+                } catch (error) {
+                    showError('加载文章数据失败: ' + error.message);
+                    return;
+                }
+            }
+            
+            // 更新UI
+            updateArticleButton(articleId);
+            
+            // 重新加载统计数据以确保时间轴正确
+            if (currentStartDate && currentEndDate) {
+                await loadStatistics(null, currentStartDate, currentEndDate);
+            } else {
+                await loadStatistics(currentTimeRange || 7);
+            }
+            
+            // 重新渲染图表
+            if (chartData) {
+                renderOverviewChart(chartData);
+            }
+        }
+        
+        // 更新文章按钮状态
+        function updateArticleButton(articleId) {
+            const articleItem = document.querySelector(`[data-article-id="${articleId}"]`);
+            if (articleItem) {
+                const inChart = selectedArticles.has(articleId);
+                articleItem.classList.toggle('in-chart', inChart);
+                
+                const button = articleItem.querySelector('.article-actions button');
+                if (button) {
+                    button.textContent = inChart ? '从图表移除' : '添加到图表';
+                    button.classList.toggle('secondary', inChart);
+                }
+            }
+        }
+        
+        // 手动爬取
+        async function manualCrawl() {
+            try {
+                const response = await fetch('/api/crawl', {
+                    method: 'POST'
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    startProgressPolling();
+                } else {
+                    showError('爬取失败: ' + result.error);
+                }
+            } catch (error) {
+                showError('爬取失败: ' + error.message);
+            }
+        }
+        
+        // 格式化数字
+        function formatNumber(num) {
+            if (num >= 1000000) {
+                return (num / 1000000).toFixed(1) + 'M';
+            } else if (num >= 1000) {
+                return (num / 1000).toFixed(1) + 'k';
+            }
+            return num.toString();
+        }
+        
+        // 显示错误
+        function showError(msg) {
+            const errorDiv = document.getElementById('errorMsg');
+            errorDiv.innerHTML = msg ? `<div class="error">${msg}</div>` : '';
+        }
+        
+        // 显示成功消息
+        function showSuccess(msg) {
+            const errorDiv = document.getElementById('errorMsg');
+            errorDiv.innerHTML = msg ? `<div class="success">${msg}</div>` : '';
+            // 3秒后自动清除
+            setTimeout(() => {
+                errorDiv.innerHTML = '';
+            }, 3000);
+        }
+        
+        // 转义HTML
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // 回车添加
+        document.getElementById('articleUrl').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                addArticle();
+            }
+        });
+        
+        // 加载设置
+        async function loadSettings() {
+            try {
+                const response = await fetch('/api/settings');
+                const result = await response.json();
+                
+                if (result.success) {
+                    document.getElementById('intervalHours').value = result.data.crawl_interval_hours;
+                    document.getElementById('currentInterval').textContent = result.data.crawl_interval_hours;
+                }
+            } catch (error) {
+                console.error('加载设置失败:', error);
+            }
+        }
+        
+        // 更新设置
+        async function updateSettings() {
+            const intervalHours = parseInt(document.getElementById('intervalHours').value);
+            
+            if (!intervalHours || intervalHours < 1) {
+                showError('爬取间隔必须大于0');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({crawl_interval_hours: intervalHours})
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    document.getElementById('currentInterval').textContent = intervalHours;
+                    showError('');
+                    alert('设置已保存！定时任务将在下次执行时使用新间隔。');
+                } else {
+                    showError('保存失败: ' + result.error);
+                }
+            } catch (error) {
+                showError('保存失败: ' + error.message);
+            }
+        }
+        
+        // 切换自定义日期选择器
+        function toggleCustomDate() {
+            const startDate = document.getElementById('startDate');
+            const endDate = document.getElementById('endDate');
+            const separator = document.getElementById('dateSeparator');
+            const isVisible = startDate.style.display !== 'none';
+            
+            if (isVisible) {
+                startDate.style.display = 'none';
+                endDate.style.display = 'none';
+                separator.style.display = 'none';
+                // 恢复时间范围按钮
+                document.querySelectorAll('.time-range-btn').forEach(btn => {
+                    btn.disabled = false;
+                });
+                changeTimeRange(0); // 默认返回今天
+            } else {
+                startDate.style.display = 'inline-block';
+                endDate.style.display = 'inline-block';
+                separator.style.display = 'inline';
+                const end = new Date();
+                const start = new Date();
+                start.setDate(start.getDate() - 7);
+                endDate.value = end.toISOString().split('T')[0];
+                startDate.value = start.toISOString().split('T')[0];
+                updateCustomDateRange();
+            }
+        }
+        
+        // 更新自定义日期范围
+        async function updateCustomDateRange() {
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
+            
+            if (startDate && endDate) {
+                currentStartDate = startDate;
+                currentEndDate = endDate;
+                currentTimeRange = null;
+                
+                // 检查是否只选择了当天
+                const isSameDay = startDate === endDate;
+                
+                // 更新按钮状态
+                document.querySelectorAll('.time-range-btn').forEach(btn => {
+                    btn.classList.remove('active');
+                    // 如果只选择了当天，禁用时间范围按钮
+                    btn.disabled = isSameDay;
+                });
+                
+                await loadStatistics(null, startDate, endDate);
+                await reloadSelectedArticles();
+                if (chartData) renderOverviewChart(chartData);
+            }
+        }
+        
+        // 更新进度显示
+        function updateProgress(progress) {
+            const panel = document.getElementById('progressPanel');
+            const bar = document.getElementById('progressBar');
+            const text = document.getElementById('progressText');
+            const stats = document.getElementById('progressStats');
+            const url = document.getElementById('progressUrl');
+            const crawlBtn = document.getElementById('crawlBtn');
+            
+            if (progress.is_running) {
+                panel.classList.add('active');
+                const percent = progress.total > 0 ? Math.round((progress.current / progress.total) * 100) : 0;
+                bar.style.width = percent + '%';
+                bar.textContent = percent + '%';
+                text.textContent = `正在爬取: ${progress.current}/${progress.total}`;
+                stats.textContent = `成功: ${progress.success} | 失败: ${progress.failed}`;
+                url.textContent = progress.current_url || '';
+                crawlBtn.disabled = true;
+                crawlBtn.textContent = '爬取中...';
+            } else {
+                if (progress.total > 0) {
+                    setTimeout(() => {
+                        panel.classList.remove('active');
+                        crawlBtn.disabled = false;
+                        crawlBtn.textContent = '手动爬取';
+                        loadArticles();
+                        if (currentStartDate && currentEndDate) {
+                            loadStatistics(null, currentStartDate, currentEndDate);
+                        } else {
+                            loadStatistics(currentTimeRange || 7);
+                        }
+                    }, 2000);
+                } else {
+                    panel.classList.remove('active');
+                    crawlBtn.disabled = false;
+                    crawlBtn.textContent = '手动爬取';
+                }
+            }
+        }
+        
+        // 轮询进度
+        function startProgressPolling() {
+            if (progressInterval) return;
+            progressInterval = setInterval(async () => {
+                try {
+                    const response = await fetch('/api/crawl/progress');
+                    const result = await response.json();
+                    if (result.success) {
+                        updateProgress(result.data);
+                        if (!result.data.is_running) {
+                            clearInterval(progressInterval);
+                            progressInterval = null;
+                        }
+                    }
+                } catch (error) {
+                    console.error('获取进度失败:', error);
+                }
+            }, 1000);
+        }
+        
+        // 加载统计数据
+        async function loadStatistics(days = 7, startDate = null, endDate = null) {
+            try {
+                const params = new URLSearchParams();
+                
+                // 判断是否是今天模式（需要按小时显示）
+                const isToday = startDate && endDate && startDate === endDate;
+                
+                if (days) {
+                    params.append('days', days);
+                } else if (startDate && endDate) {
+                    params.append('start_date', startDate);
+                    params.append('end_date', endDate);
+                    if (isToday) {
+                        params.append('group_by_hour', 'true');
+                    }
+                } else {
+                    params.append('days', '7');
+                }
+                
+                const url = '/api/statistics?' + params.toString();
+                const response = await fetch(url);
+                const result = await response.json();
+                
+                if (result.success) {
+                    chartData = result.data;
+                    updateDateRange(chartData.date_range);
+                    return true;
+                }
+                return false;
+            } catch (error) {
+                console.error('加载统计数据失败:', error);
+                return false;
+            }
+        }
+        
+        // 更新日期范围显示
+        function updateDateRange(range) {
+            const rangeEl = document.getElementById('dateRange');
+            if (range) {
+                rangeEl.textContent = `${range.start} 至 ${range.end}`;
+            }
+        }
+        
+        // 切换时间范围
+        async function changeTimeRange(days) {
+            currentTimeRange = days;
+            
+            // 如果是今天，设置为当天的日期范围
+            if (days === 0) {
+                const today = new Date();
+                const todayStr = today.toISOString().split('T')[0];
+                currentStartDate = todayStr;
+                currentEndDate = todayStr;
+            } else {
+                currentStartDate = null;
+                currentEndDate = null;
+            }
+            
+            document.querySelectorAll('.time-range-btn').forEach(btn => {
+                btn.disabled = false; // 恢复启用
+                if (parseInt(btn.dataset.days) === days) {
+                    btn.classList.add('active');
+                } else {
+                    btn.classList.remove('active');
+                }
+            });
+            
+            document.getElementById('startDate').style.display = 'none';
+            document.getElementById('endDate').style.display = 'none';
+            document.getElementById('dateSeparator').style.display = 'none';
+            
+            // 如果是今天，使用日期范围加载，否则使用天数
+            if (days === 0) {
+                await loadStatistics(null, currentStartDate, currentEndDate);
+            } else {
+                await loadStatistics(days);
+            }
+            
+            await reloadSelectedArticles();
+            if (chartData) {
+                renderOverviewChart(chartData);
+            }
+        }
+        
+        // 重新加载选中的文章数据
+        async function reloadSelectedArticles() {
+            const articleIds = Array.from(selectedArticles);
+            const isToday = currentStartDate && currentEndDate && currentStartDate === currentEndDate;
+            
+            for (const articleId of articleIds) {
+                try {
+                    let url = `/api/articles/${articleId}/history?limit=1000`;
+                    
+                    // 如果有日期范围，添加到请求中
+                    if (currentStartDate && currentEndDate) {
+                        url += `&start_date=${currentStartDate}&end_date=${currentEndDate}`;
+                        if (isToday) {
+                            url += '&group_by_hour=true';
+                        }
+                    } else if (currentTimeRange) {
+                        // 根据时间范围计算日期
+                        const endDate = new Date();
+                        const startDate = new Date();
+                        startDate.setDate(startDate.getDate() - currentTimeRange + 1);
+                        url += `&start_date=${startDate.toISOString().split('T')[0]}&end_date=${endDate.toISOString().split('T')[0]}`;
+                    }
+                    
+                    const response = await fetch(url);
+                    const result = await response.json();
+                    if (result.success) {
+                        // 即使数据为空，也更新文章信息
+                        articleHistories[articleId] = {
+                            title: result.title || articleHistories[articleId]?.title || '未知文章',
+                            data: result.data || [],  // 如果没有数据，使用空数组
+                            site: result.site || articleHistories[articleId]?.site || '其他'
+                        };
+                    }
+                } catch (error) {
+                    console.error(`加载文章 ${articleId} 数据失败:`, error);
+                }
+            }
+        }
+        
+        // 渲染综合趋势图
+        function renderOverviewChart(data) {
+            const ctx = document.getElementById('overviewChartCanvas').getContext('2d');
+            
+            if (overviewChart) {
+                overviewChart.destroy();
+            }
+            
+            // 生成数据集 - 仅显示选中的文章数据
+            const datasets = [];
+            
+            // 添加选中的文章数据
+            const articleColors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A', '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E2'];
+            let colorIndex = 0;
+            
+            selectedArticles.forEach(articleId => {
+                const history = articleHistories[articleId];
+                if (history) {
+                    // 将历史数据按日期对齐到图表日期轴
+                    // 即使 data 为空数组，也会返回全 null 的数据点数组
+                    const articleData = alignDataToDates(history.data || [], data.dates);
+                    
+                    // 获取平台信息
+                    const site = history.site || '其他';
+                    const platformName = siteConfig[site]?.name || site;
+                    const articleTitle = history.title || '未知文章';
+                    
+                    const color = articleColors[colorIndex % articleColors.length];
+                    datasets.push({
+                        label: platformName,  // 显示平台名称而不是文章标题
+                        data: articleData,
+                        borderColor: color,
+                        backgroundColor: color + '15',
+                        borderWidth: 3,
+                        pointRadius: 5,
+                        pointHoverRadius: 7,
+                        pointBackgroundColor: color,
+                        pointBorderColor: '#fff',
+                        pointBorderWidth: 2,
+                        fill: false,
+                        spanGaps: true,  // 让线条跨越空数据点，保持连贯
+                        articleTitle: articleTitle  // 保存文章标题用于 tooltip
+                    });
+                    colorIndex++;
+                }
+            });
+            
+            overviewChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: data.dates,
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    plugins: {
+                        legend: {
+                            display: datasets.length > 0,
+                            position: 'top',
+                            labels: {
+                                usePointStyle: true,
+                                padding: 15,
+                                font: {
+                                    size: 13
+                                }
+                            }
+                        },
+                        tooltip: {
+                            backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                            padding: 12,
+                            titleColor: '#fff',
+                            bodyColor: '#fff',
+                            borderWidth: 0,
+                            displayColors: true,
+                            mode: 'index',
+                            intersect: false,
+                            callbacks: {
+                                title: function(context) {
+                                    // 如果是小时格式，显示友好的标题
+                                    const label = context[0].label;
+                                    if (label && label.includes(':')) {
+                                        // 格式: "2025-11-06 14:00:00" -> "14:00"
+                                        const parts = label.split(' ');
+                                        if (parts.length >= 2) {
+                                            return parts[1].substring(0, 5); // 只显示 HH:MM
+                                        }
+                                    }
+                                    return label;
+                                },
+                                label: function(context) {
+                                    const platformName = context.dataset.label || '';
+                                    const articleTitle = context.dataset.articleTitle || '';
+                                    const count = context.parsed.y;
+                                    
+                                    // 显示完整数字，不使用简写
+                                    const fullCount = count.toLocaleString('zh-CN');
+                                    
+                                    // 返回：平台名称 - 文章标题: 阅读数
+                                    return `${platformName} - ${articleTitle}: ${fullCount}`;
+                                }
+                            }
+                        },
+                        // 自定义插件：在数据点上显示数字
+                        datalabels: {
+                            display: true,
+                            align: 'top',
+                            anchor: 'end',
+                            offset: 4,
+                            font: {
+                                size: 11,
+                                weight: 'bold'
+                            },
+                            color: function(context) {
+                                return context.dataset.borderColor;
+                            },
+                            formatter: function(value, context) {
+                                // 如果值为null，不显示
+                                if (value === null || value === undefined) {
+                                    return '';
+                                }
+                                // 显示完整数字，使用千位分隔符
+                                return value.toLocaleString('zh-CN');
+                            }
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            grid: {
+                                color: 'rgba(0, 0, 0, 0.05)',
+                                drawBorder: false
+                            },
+                            ticks: {
+                                font: {
+                                    size: 12
+                                },
+                                color: '#666',
+                                callback: function(value) {
+                                    // 显示完整数字，不使用简写（如 2k）
+                                    return value.toLocaleString('zh-CN');
+                                }
+                            }
+                        },
+                        x: {
+                            grid: {
+                                display: false,
+                                drawBorder: false
+                            },
+                            ticks: {
+                                font: {
+                                    size: 12
+                                },
+                                color: '#666',
+                                maxRotation: 0,
+                                minRotation: 0
+                            }
+                        }
+                    },
+                    interaction: {
+                        mode: 'nearest',
+                        axis: 'x',
+                        intersect: false
+                    },
+                    elements: {
+                        line: {
+                            tension: 0.4
+                        },
+                        point: {
+                            radius: 4,
+                            hitRadius: 10,
+                            hoverRadius: 6,
+                            hoverBorderWidth: 2
+                        }
+                    }
+                }
+            });
+            
+            // 渲染自定义图例
+            renderLegend();
+        }
+        
+        // 将文章数据对齐到图表日期
+        function alignDataToDates(historyData, dates) {
+            if (!historyData || historyData.length === 0) {
+                return dates.map(() => null);
+            }
+            
+            // 检测是否是小时模式（日期包含冒号）
+            const isHourlyMode = dates.length > 0 && dates[0].includes(':');
+            
+            // 按日期或小时分组
+            const dataByKey = {};
+            historyData.forEach(item => {
+                try {
+                    let key;
+                    if (isHourlyMode) {
+                        // 小时模式：保留到小时 (YYYY-MM-DD HH:00:00)
+                        const timestamp = item.timestamp;
+                        if (timestamp.includes(':')) {
+                            // 如果已经是格式化的时间戳，直接使用
+                            key = timestamp;
+                        } else {
+                            // 否则格式化为小时
+                            const date = new Date(timestamp);
+                            const year = date.getFullYear();
+                            const month = String(date.getMonth() + 1).padStart(2, '0');
+                            const day = String(date.getDate()).padStart(2, '0');
+                            const hour = String(date.getHours()).padStart(2, '0');
+                            key = `${year}-${month}-${day} ${hour}:00:00`;
+                        }
+                    } else {
+                        // 日期模式：只保留日期部分
+                        key = new Date(item.timestamp).toISOString().split('T')[0];
+                    }
+                    
+                    // 如果同一个key有多条数据，取count最大的
+                    if (!dataByKey[key] || item.count > dataByKey[key].count) {
+                        dataByKey[key] = item;
+                    }
+                } catch (e) {
+                    console.error('数据对齐错误:', e, item);
+                }
+            });
+            
+            // 对齐到图表日期序列
+            const aligned = [];
+            dates.forEach(date => {
+                const item = dataByKey[date];
+                aligned.push(item ? item.count : null); // null表示没有数据，Chart.js会跳过该点
+            });
+            
+            return aligned;
+        }
+        
+        // 渲染图例
+        function renderLegend() {
+            const legendEl = document.getElementById('chartLegend');
+            let html = '';
+            
+            // 如果有选中的文章，显示提示信息
+            if (selectedArticles.size > 0) {
+                html = `<div style="color: #666; font-size: 13px; padding: 10px; background: #f8f9fa; border-radius: 4px;">
+                    <span style="color: #ff6b35; font-weight: 500;">●</span> 已选中 ${selectedArticles.size} 篇文章进行对比分析
+                </div>`;
+            } else {
+                html = '<div style="color: #999; font-size: 13px; padding: 10px;">💡 请在"数据列表"标签页中点击"添加到图表"按钮来查看文章阅读数趋势</div>';
+            }
+            
+            legendEl.innerHTML = html;
+        }
+        
+        
+        // 初始化加载
+        async function init() {
+            await loadArticles(); // 先加载文章列表
+            
+            // 初始化为今天的数据
+            const today = new Date().toISOString().split('T')[0];
+            currentStartDate = today;
+            currentEndDate = today;
+            currentTimeRange = 0;
+            
+            // 设置今天按钮为激活状态
+            document.querySelectorAll('.time-range-btn').forEach(btn => {
+                if (parseInt(btn.dataset.days) === 0) {
+                    btn.classList.add('active');
+                } else {
+                    btn.classList.remove('active');
+                }
+            });
+            
+            await loadStatistics(null, today, today);
+            if (chartData) {
+                renderOverviewChart(chartData);
+            }
+            
+            // 更新数据卡片
+            updateDataCards();
+        }
+        
+        // 确保DOM加载后再初始化
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init);
+        } else {
+            init();
+        }
+    </script>
+</body>
+</html>
+

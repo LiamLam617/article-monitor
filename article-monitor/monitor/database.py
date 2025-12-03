@@ -1,0 +1,375 @@
+"""
+数据库操作 - 简单的SQLite，没有ORM的废话
+"""
+import sqlite3
+import os
+from datetime import datetime
+from typing import List, Dict, Optional
+from .config import DATABASE_PATH
+
+# 确保数据目录存在
+os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
+
+def get_db():
+    """获取数据库连接"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    """初始化数据库 - 就三个表，简单到不能再简单"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # 文章表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS articles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT UNIQUE NOT NULL,
+            title TEXT,
+            site TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # 阅读数记录表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS read_counts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            article_id INTEGER NOT NULL,
+            count INTEGER NOT NULL,
+            timestamp TIMESTAMP DEFAULT (datetime('now', 'localtime')),
+            FOREIGN KEY (article_id) REFERENCES articles(id)
+        )
+    ''')
+    
+    # 设置表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # 索引 - 性能优化
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_article_id ON read_counts(article_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON read_counts(timestamp)')
+    
+    # 初始化默认设置
+    from .config import CRAWL_INTERVAL_HOURS
+    cursor.execute('SELECT COUNT(*) as count FROM settings WHERE key = ?', ('crawl_interval_hours',))
+    if cursor.fetchone()['count'] == 0:
+        cursor.execute('''
+            INSERT INTO settings (key, value) VALUES (?, ?)
+        ''', ('crawl_interval_hours', str(CRAWL_INTERVAL_HOURS)))
+    
+    conn.commit()
+    conn.close()
+
+def add_article(url: str, title: Optional[str] = None, site: Optional[str] = None) -> int:
+    """添加文章，返回文章ID"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute(
+            'INSERT INTO articles (url, title, site) VALUES (?, ?, ?)',
+            (url, title, site)
+        )
+        article_id = cursor.lastrowid
+        conn.commit()
+        return article_id
+    except sqlite3.IntegrityError:
+        # URL已存在，返回现有ID
+        cursor.execute('SELECT id FROM articles WHERE url = ?', (url,))
+        row = cursor.fetchone()
+        return row['id'] if row else None
+    finally:
+        conn.close()
+
+def get_all_articles() -> List[Dict]:
+    """获取所有文章"""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM articles ORDER BY created_at DESC')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_article_by_url(url: str) -> Optional[Dict]:
+    """根据URL获取文章"""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM articles WHERE url = ?', (url,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def add_read_count(article_id: int, count: int):
+    """添加阅读数记录 - 使用本地时间"""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO read_counts (article_id, count, timestamp) VALUES (?, ?, datetime('now', 'localtime'))",
+        (article_id, count)
+    )
+    conn.commit()
+    conn.close()
+
+def get_read_counts(article_id: int, limit: int = 100, start_date: str = None, end_date: str = None, group_by_hour: bool = False) -> List[Dict]:
+    """获取文章阅读数历史 - 使用timestamp和id双重排序确保稳定性
+
+    Args:
+        article_id: 文章ID
+        limit: 返回记录数限制
+        start_date: 开始日期 (可选, 格式: YYYY-MM-DD)
+        end_date: 结束日期 (可选, 格式: YYYY-MM-DD)
+        group_by_hour: 是否按小时分组 (用于今天视图)
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+
+    if group_by_hour and start_date:
+        # 按小时分组，获取每小时的最新记录
+        query = '''
+            SELECT 
+                article_id,
+                MAX(count) as count,
+                strftime('%Y-%m-%d %H:00:00', timestamp) as timestamp
+            FROM read_counts 
+            WHERE article_id = ? AND DATE(timestamp) = ?
+            GROUP BY strftime('%H', timestamp)
+            ORDER BY timestamp ASC
+        '''
+        cursor.execute(query, (article_id, start_date))
+    else:
+        # 原有逻辑：按日期查询
+        query = 'SELECT * FROM read_counts WHERE article_id = ?'
+        params = [article_id]
+
+        # 添加日期过滤
+        if start_date:
+            query += ' AND DATE(timestamp) >= ?'
+            params.append(start_date)
+
+        if end_date:
+            query += ' AND DATE(timestamp) <= ?'
+            params.append(end_date)
+
+        query += ' ORDER BY timestamp DESC, id DESC LIMIT ?'
+        params.append(limit)
+
+        cursor.execute(query, tuple(params))
+    
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_latest_read_count(article_id: int) -> Optional[Dict]:
+    """获取最新阅读数 - 使用timestamp和id双重排序确保稳定性"""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT * FROM read_counts WHERE article_id = ? ORDER BY timestamp DESC, id DESC LIMIT 1',
+        (article_id,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def delete_article(article_id: int):
+    """删除文章及所有记录"""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM read_counts WHERE article_id = ?', (article_id,))
+    cursor.execute('DELETE FROM articles WHERE id = ?', (article_id,))
+    conn.commit()
+    conn.close()
+
+
+def update_article_title(article_id: int, title: str) -> bool:
+    """更新文章标题
+    
+    Args:
+        article_id: 文章ID
+        title: 新标题
+        
+    Returns:
+        是否更新成功
+    """
+    if not title or not title.strip():
+        return False
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        'UPDATE articles SET title = ? WHERE id = ?',
+        (title.strip(), article_id)
+    )
+    updated = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return updated
+
+def delete_read_count_by_timestamp(article_id: int, timestamp: str) -> int:
+    """删除指定文章的指定时间点的阅读数记录
+    
+    Args:
+        article_id: 文章ID
+        timestamp: 时间戳 (格式: YYYY-MM-DD HH:MM:SS)
+    
+    Returns:
+        删除的记录数
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    # 精确匹配时间戳（允许小的时间差）
+    cursor.execute('''
+        DELETE FROM read_counts 
+        WHERE article_id = ? AND timestamp = ?
+    ''', (article_id, timestamp))
+    deleted_count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted_count
+
+def get_article_by_url(url: str) -> Optional[Dict]:
+    """根据URL获取文章信息"""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM articles WHERE url = ?', (url,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def get_setting(key: str, default_value=None):
+    """获取设置 - 返回原始字符串值，由调用者负责类型转换"""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT value FROM settings WHERE key = ?', (key,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return row['value']
+    return default_value
+
+def set_setting(key: str, value):
+    """设置配置"""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO settings (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+    ''', (key, str(value)))
+    conn.commit()
+    conn.close()
+
+def get_aggregated_read_counts(days: int = None, start_date: str = None, end_date: str = None) -> List[Dict]:
+    """获取聚合阅读数数据（按日期和网站分组）- 每篇文章只取最大阅读数"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # 构建 WHERE 条件
+    where_clause = "1=1"
+    params = []
+    
+    if start_date and end_date:
+        where_clause = "strftime('%Y-%m-%d', timestamp) >= ? AND strftime('%Y-%m-%d', timestamp) <= ?"
+        params = [start_date, end_date]
+    elif days:
+        where_clause = "timestamp >= datetime('now', '-' || ? || ' days')"
+        params = [days]
+    
+    # 使用子查询获取每篇文章在指定日期的最大阅读数
+    cursor.execute(f'''
+        SELECT 
+            max_counts.date,
+            a.site,
+            SUM(max_counts.max_count) as total_count,
+            COUNT(DISTINCT max_counts.article_id) as article_count
+        FROM (
+            SELECT 
+                article_id,
+                strftime('%Y-%m-%d', timestamp) as date,
+                MAX(count) as max_count
+            FROM read_counts
+            WHERE {where_clause}
+            GROUP BY article_id, strftime('%Y-%m-%d', timestamp)
+        ) max_counts
+        JOIN articles a ON max_counts.article_id = a.id
+        GROUP BY max_counts.date, a.site
+        ORDER BY max_counts.date ASC, a.site ASC
+    ''', params)
+    
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_all_read_counts_summary(days: int = None, start_date: str = None, end_date: str = None) -> List[Dict]:
+    """获取所有阅读数汇总（按日期）- 每篇文章只取最大阅读数"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # 构建 WHERE 条件
+    where_clause = "1=1"
+    params = []
+    
+    if start_date and end_date:
+        where_clause = "strftime('%Y-%m-%d', timestamp) >= ? AND strftime('%Y-%m-%d', timestamp) <= ?"
+        params = [start_date, end_date]
+    elif days:
+        where_clause = "timestamp >= datetime('now', '-' || ? || ' days')"
+        params = [days]
+    
+    # 使用子查询获取每篇文章每天的最大阅读数，然后求和
+    cursor.execute(f'''
+        SELECT 
+            date,
+            SUM(max_count) as total_count,
+            COUNT(*) as article_count,
+            AVG(max_count) as avg_count
+        FROM (
+            SELECT 
+                article_id,
+                strftime('%Y-%m-%d', timestamp) as date,
+                MAX(count) as max_count
+            FROM read_counts
+            WHERE {where_clause}
+            GROUP BY article_id, strftime('%Y-%m-%d', timestamp)
+        )
+        GROUP BY date
+        ORDER BY date ASC
+    ''', params)
+    
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def clear_cache(days: int = None, before_date: str = None) -> int:
+    """清除缓存 - 删除指定天数之前或指定日期之前的数据"""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    if before_date:
+        # 删除指定日期之前的数据
+        cursor.execute('''
+            DELETE FROM read_counts 
+            WHERE strftime('%Y-%m-%d', timestamp) < ?
+        ''', (before_date,))
+    elif days:
+        # 删除指定天数之前的数据
+        cursor.execute('''
+            DELETE FROM read_counts 
+            WHERE timestamp < datetime('now', '-' || ? || ' days')
+        ''', (days,))
+    else:
+        # 如果没有指定条件，返回0
+        conn.close()
+        return 0
+    
+    deleted_count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted_count
+

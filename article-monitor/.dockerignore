@@ -1,0 +1,85 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursor/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+.hypothesis/
+tests/
+
+# Database (will be created in container)
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+!data/.gitkeep
+
+# Logs (will be created in container)
+logs/
+*.log
+!logs/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+*.bak
+
+# Temporary files
+.backup/
+*.tmp
+*.temp
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Documentation (optional, can be included)
+docs/
+
+# Scripts (optional, can be included)
+scripts/
+
+# Other
+*.md
+!README.md
+LICENSE
+Makefile
+pyproject.toml
+setup.py
+requirements-dev.txt
+pytest.ini
+
+# Crawl4AI skill docs (not needed in production)
+crawl4ai/
+
+# Test data / HTML samples (not needed in production)
+test_data/

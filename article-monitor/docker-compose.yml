@@ -1,0 +1,65 @@
+services:
+  article-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: article-monitor
+    
+    # 关键优化 1: 增加共享内存大小
+    # Chromium/Playwright 非常依赖 /dev/shm。Docker 默认只有 64MB，
+    # 这会导致浏览器频繁崩溃 (Crash)。设置为 1gb 或 2gb 可解决此问题。
+    shm_size: '1gb'
+
+    # 关键优化 2: 启用 init 进程
+    # 转发信号并清理僵尸进程，这对于包含多进程(如浏览器)的容器非常重要
+    init: true
+
+    ports:
+      - "5000:5000"
+
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # 挂载时区文件，确保容器时间与宿主机完全同步 (可选，Dockerfile 已设置 TZ)
+      - /etc/localtime:/etc/localtime:ro
+
+    environment:
+      - TZ=Asia/Shanghai
+      # Flask 配置
+      - FLASK_HOST=0.0.0.0
+      - FLASK_PORT=5000
+      - FLASK_DEBUG=false
+      # 爬取配置
+      - CRAWL_INTERVAL_HOURS=6
+      - CRAWL_CONCURRENCY=5
+      # 增加并发延迟，避免被封 IP
+      - CRAWL_DELAY=2.0
+      # 开启防反爬功能 (如果代码支持环境变量控制)
+      - ANTI_SCRAPING_ENABLED=true
+    
+    restart: unless-stopped
+
+    # 关键优化 3: 日志轮转
+    # 防止容器日志无限制增长占满磁盘
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # 健康检查 (与 Dockerfile 保持一致，使用 curl)
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # 资源限制 (可选，根据你的服务器配置调整)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '1.5'
+    #       memory: 2048M
+    #     reservations:
+    #       memory: 512M

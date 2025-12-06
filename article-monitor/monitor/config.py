@@ -60,7 +60,8 @@ SUPPORTED_SITES = {
     'segmentfault.com': 'segmentfault',
     'jianshu.com': 'jinshu',  # 修改为 jinshu 以匹配数据库
     'eefocus.com': 'eefocus',
-    'freebuf.com': 'freebuf'
+    'freebuf.com': 'freebuf',
+    'sohu.com': 'sohu'
 }
 
 # 平台提取规则配置
@@ -148,16 +149,32 @@ PLATFORM_EXTRACTORS = {
         'parse_method': 'number'
     },
     'freebuf': {
-        'wait_for': 'js:() => { const el = document.querySelector(".review"); if (!el) return false; const text = (el.textContent || el.innerText || "").trim(); return text.match(/\\d{3,}/) !== null; }',  # 等待 .review 元素出现且包含至少3位数字
-        'timeout': 60000,  # 60秒超时，FreeBuf 网站加载较慢
-        'delay_before_return': 3000,  # 额外等待3秒，确保 JavaScript 渲染完成
+        # FreeBuf 有滑块验证码反爬机制，可能导致提取失败
+        # 尝试等待文章内容加载，而不是直接等待 .review 元素
+        'wait_for': 'css:article, .article-content, .post-content',  # 等待文章内容加载
+        'timeout': 30000,  # 30秒超时（减少无效等待）
+        'delay_before_return': 2000,  # 等待2秒让JS渲染
         'js_extract': True,  # 使用 JavaScript 提取
         'patterns': [
-            r'</i>\s*([\d,]+)\s+</span>',  # 匹配 </i> 和 </span> 之间的数字（数字后必须有空白字符）
-            r'</i>\s*([\d,]+)\s*</span>',  # 匹配 </i> 和 </span> 之间的数字（数字后可以有或没有空白字符）
-            r'<span[^>]*class="review"[^>]*>.*?</i>\s*([\d,]+)\s+</span>',  # 在 review span 中匹配
-            r'class="review"[^>]*>.*?<i[^>]*>.*?</i>\s*([\d,]+)\s+</span>',  # 匹配 review 中的数字
-            r'class="review"[^>]*>.*?([\d,]+)\s+</span>'  # 最后的备选方案
+            r'READ_COUNT:([\d,]+)',  # 从 JS 注入的标记提取
+            r'</i>\s*([\d,]+)\s+</span>',  # 匹配 </i> 和 </span> 之间的数字
+            r'</i>\s*([\d,]+)\s*</span>',
+            r'<span[^>]*class="review"[^>]*>.*?</i>\s*([\d,]+)\s+</span>',
+            r'class="review"[^>]*>.*?<i[^>]*>.*?</i>\s*([\d,]+)\s+</span>',
+            r'class="review"[^>]*>.*?([\d,]+)\s+</span>',
+            r'fire[^>]*>.*?([\d,]+)'  # 备选：火焰图标后的数字
+        ],
+        'parse_method': 'number'
+    },
+    'sohu': {
+        # 使用 JavaScript 条件等待：确保 em[data-role="pv"] 中有数字
+        'wait_for': 'js:() => { const el = document.querySelector("em[data-role=\\"pv\\"]"); return el && /^\\d+$/.test(el.textContent.trim()); }',
+        'timeout': 30000,
+        'js_extract': True,  # 使用 JavaScript 提取
+        'patterns': [
+            r'SOHU_PV_COUNT:(\d+)',  # 从注入的标记提取
+            r'阅读\s*\(\s*(\d+)\s*\)',  # 匹配 "阅读 (601)"
+            r'>(\d+)</em>',  # 直接匹配 em 中的数字
         ],
         'parse_method': 'number'
     },

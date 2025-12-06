@@ -308,30 +308,74 @@ async def extract_with_config_full(url: str, platform: str, crawler: Optional[As
         manager = _get_anti_scraping_manager()
         stealth_js = manager.get_stealth_js()
     
-    # 对于 freebuf，使用 JavaScript 提取数字
+    # 平台特定的 JavaScript 提取逻辑
     platform_js = ""
-    if platform == 'freebuf' and config.get('js_extract', False):
-        platform_js = """
-        (() => {
-            const reviewEl = document.querySelector('.review');
-            if (!reviewEl) return null;
-            const text = (reviewEl.textContent || reviewEl.innerText || '').trim();
-            // 查找至少3位的数字（排除 SVG path 中的小数字）
-            const numbers = text.match(/\\b([\\d,]{3,})\\b/g);
-            if (numbers && numbers.length > 0) {
-                // 选择最大的数字（最可能是阅读数）
-                const maxNum = numbers.reduce((a, b) => {
-                    const numA = parseInt(a.replace(/,/g, ''));
-                    const numB = parseInt(b.replace(/,/g, ''));
-                    return numA > numB ? a : b;
-                });
-                // 写入页面标题，方便后续提取
-                document.title = 'READ_COUNT:' + maxNum;
-                return maxNum;
-            }
-            return null;
-        })();
-        """
+    if config.get('js_extract', False):
+        if platform == 'freebuf':
+            platform_js = """
+            (() => {
+                // 首先检测是否有验证码弹窗
+                const captchaTexts = ['访问验证', '请按住滑块', '拖动到最右边', '滑块验证'];
+                const pageText = document.body.innerText || '';
+                for (const text of captchaTexts) {
+                    if (pageText.includes(text)) {
+                        document.title = 'CAPTCHA_DETECTED';
+                        console.log('FreeBuf captcha detected');
+                        return null;
+                    }
+                }
+                
+                // 尝试多种选择器查找阅读数
+                const selectors = ['.review', '.article-info .fire', '[class*="review"]', '[class*="fire"]'];
+                let reviewEl = null;
+                for (const sel of selectors) {
+                    reviewEl = document.querySelector(sel);
+                    if (reviewEl) break;
+                }
+                
+                if (!reviewEl) {
+                    console.log('FreeBuf: review element not found');
+                    return null;
+                }
+                
+                const text = (reviewEl.textContent || reviewEl.innerText || '').trim();
+                // 查找至少3位的数字（排除 SVG path 中的小数字）
+                const numbers = text.match(/\\b([\\d,]{3,})\\b/g);
+                if (numbers && numbers.length > 0) {
+                    // 选择最大的数字（最可能是阅读数）
+                    const maxNum = numbers.reduce((a, b) => {
+                        const numA = parseInt(a.replace(/,/g, ''));
+                        const numB = parseInt(b.replace(/,/g, ''));
+                        return numA > numB ? a : b;
+                    });
+                    // 写入页面标题，方便后续提取
+                    document.title = 'READ_COUNT:' + maxNum;
+                    return maxNum;
+                }
+                return null;
+            })();
+            """
+        elif platform == 'sohu':
+            # 搜狐：wait_for 已确保数字加载完成，这里直接提取并注入标记
+            platform_js = """
+            (() => {
+                const pvEl = document.querySelector('em[data-role="pv"]');
+                if (pvEl) {
+                    const text = pvEl.textContent.trim();
+                    if (/^\\d+$/.test(text)) {
+                        // 在 HTML 中注入明确的标记，确保能被正则提取
+                        const marker = document.createElement('script');
+                        marker.type = 'text/plain';
+                        marker.id = 'sohu-pv-marker';
+                        marker.textContent = 'SOHU_PV_COUNT:' + text;
+                        document.head.appendChild(marker);
+                        console.log('Sohu PV injected:', text);
+                        return text;
+                    }
+                }
+                return null;
+            })();
+            """
     
     # 合并 JavaScript 代码：先执行隐身脚本，再执行平台脚本
     combined_js = stealth_js
@@ -365,47 +409,29 @@ async def extract_with_config_full(url: str, platform: str, crawler: Optional[As
     html = result.html
     markdown = result.markdown or ''
     
+    # 检测验证码（FreeBuf 等网站的反爬机制）
+    captcha_indicators = ['访问验证', '请按住滑块', '拖动到最右边', '滑块验证', 'CAPTCHA_DETECTED']
+    for indicator in captcha_indicators:
+        if indicator in html:
+            logger.warning(f"🔒 检测到验证码，无法提取: {url}")
+            return (None, None)
+    
     # 提前提取文章标题
     article_title = _extract_title_from_html(html)
     
-    # 对于 freebuf，如果配置了 JavaScript 提取，优先从标题中提取
-    if platform == 'freebuf' and js_extract:
-        # JavaScript 代码已经在爬取时执行，会将数字写入页面标题
-        # 这里我们从 HTML 的 <title> 标签中提取
-        title_match = re.search(r'<title[^>]*>READ_COUNT:([\d,]+)</title>', html, re.IGNORECASE)
-        if title_match:
-            count = _parse_number(title_match.group(1), parse_method)
-            if count is not None and count > 0:
-                return (count, article_title)
-        # 如果标题中没有，尝试从整个 HTML 中搜索
+    # 如果配置了 JavaScript 提取，优先从标记中提取（支持 freebuf, sohu 等）
+    if js_extract:
+        # 方法1: 从 READ_COUNT 标记提取
         title_match = re.search(r'READ_COUNT:([\d,]+)', html)
         if title_match:
             count = _parse_number(title_match.group(1), parse_method)
             if count is not None and count > 0:
                 return (count, article_title)
-    
-    # 对于 freebuf，如果配置了 JavaScript 提取，尝试其他方法
-    if platform == 'freebuf' and js_code:
-        try:
-            # 尝试从 result 中获取 JavaScript 执行结果
-            # 注意：crawl4ai 可能不直接返回 JS 结果，需要重新执行
-            # 这里我们先用正则表达式，如果失败再考虑其他方法
-            pass
-        except:
-            pass
-    
-    # 对于 freebuf，尝试从页面标题中提取（JavaScript 写入的）
-    if platform == 'freebuf' and js_extract:
-        # 先尝试从 <title> 标签中提取
-        title_match = re.search(r'<title[^>]*>READ_COUNT:([\d,]+)</title>', html, re.IGNORECASE)
-        if title_match:
-            count = _parse_number(title_match.group(1), parse_method)
-            if count is not None and count > 0:
-                return (count, article_title)
-        # 如果标题中没有，尝试从整个 HTML 中搜索
-        title_match = re.search(r'READ_COUNT:([\d,]+)', html)
-        if title_match:
-            count = _parse_number(title_match.group(1), parse_method)
+        
+        # 方法2: 从 SOHU_PV_COUNT 标记提取（搜狐专用）
+        sohu_pv_match = re.search(r'SOHU_PV_COUNT:(\d+)', html)
+        if sohu_pv_match:
+            count = _parse_number(sohu_pv_match.group(1), parse_method)
             if count is not None and count > 0:
                 return (count, article_title)
     
@@ -556,7 +582,8 @@ async def extract_article_info(url: str, crawler: Optional[AsyncWebCrawler] = No
         'elecfans.com': 'elecfans',
         'china.com': 'MBB',
         'eefocus.com': 'eefocus',
-        'freebuf.com': 'freebuf'
+        'freebuf.com': 'freebuf',
+        'sohu.com': 'sohu'
     }.items():
         if site_domain in domain:
             platform = site_name

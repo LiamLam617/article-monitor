@@ -5,7 +5,10 @@ import asyncio
 import logging
 from datetime import datetime
 from typing import List, Dict, Optional
-from .database import get_all_articles, add_read_count, get_latest_read_count, update_article_title
+from .database import (
+    get_all_articles, add_read_count, get_latest_read_count, 
+    update_article_title, update_article_status
+)
 from .extractors import extract_read_count, extract_article_info, create_shared_crawler
 from urllib.parse import urlparse
 from .config import (
@@ -31,6 +34,15 @@ _crawl_progress = {
     'start_time': None,
     'end_time': None
 }
+
+# 全局停止信号
+_stop_signal = False
+
+def stop_crawling():
+    """停止爬取任务"""
+    global _stop_signal
+    _stop_signal = True
+    logger.info("🛑 收到停止信号，正在停止爬取...")
 
 def get_crawl_progress():
     """获取爬取进度"""
@@ -80,8 +92,12 @@ async def crawl_article_with_retry(article: dict, crawler=None, semaphore=None, 
     # 使用信号量控制并发
     if semaphore:
         async with semaphore:
+            if _stop_signal:
+                return False
             return await _crawl_with_retry(article, crawler, max_retries)
     else:
+        if _stop_signal:
+            return False
         return await _crawl_with_retry(article, crawler, max_retries)
 
 async def _crawl_with_retry(article: dict, crawler=None, max_retries: int = 3) -> bool:
@@ -100,9 +116,19 @@ async def _crawl_with_retry(article: dict, crawler=None, max_retries: int = 3) -
                 delay = CRAWL_RETRY_DELAY * (CRAWL_RETRY_BACKOFF ** (attempt - 1))
                 logger.info(f"🔄 重试 {attempt}/{max_retries}: {url} (等待 {delay:.1f}秒)")
                 await asyncio.sleep(delay)
+                
+                # 再次检查停止信号（在睡眠期间可能收到了停止信号）
+                if _stop_signal:
+                    logger.info(f"🛑 任务已停止: {url}")
+                    return False
+                    
                 global _crawl_progress
                 _crawl_progress['retried'] += 1
             
+            # 再次检查停止信号
+            if _stop_signal:
+                return False
+                
             # 执行爬取（同时获取阅读数和标题）
             info = await extract_article_info(url, crawler)
             count = info.get('read_count')
@@ -130,6 +156,10 @@ async def _crawl_with_retry(article: dict, crawler=None, max_retries: int = 3) -
             
             # 保存阅读数
             add_read_count(article_id, count)
+            
+            # 更新状态为成功
+            update_article_status(article_id, 'OK')
+            
             if attempt > 0:
                 logger.info(f"✅ 重试成功: {url} -> {count} (尝试 {attempt + 1} 次)")
             else:
@@ -148,14 +178,23 @@ async def _crawl_with_retry(article: dict, crawler=None, max_retries: int = 3) -
                 continue
             else:
                 # 不可重试或已达到最大重试次数
+                error_msg = str(e)[:100]
                 if 'timeout' in error_str or 'connection' in error_str:
-                    logger.error(f"⏱️  网络错误 {url}: {str(e)[:100]} (已重试 {attempt} 次)")
+                    logger.error(f"⏱️  网络错误 {url}: {error_msg} (已重试 {attempt} 次)")
                 else:
-                    logger.error(f"❌ 爬取失败 {url}: {str(e)[:100]} (已重试 {attempt} 次)")
+                    logger.error(f"❌ 爬取失败 {url}: {error_msg} (已重试 {attempt} 次)")
+                
+                # 更新状态为失败（如果在最终失败前记录）
+                # 注意：这里我们只在最后一次尝试失败后才标记为ERROR，或者不可重试错误时
+                if not is_retryable or attempt >= max_retries:
+                    update_article_status(article_id, 'ERROR', str(e))
+                
                 return False
     
     # 所有重试都失败
-    logger.error(f"❌ 爬取最终失败 {url}: {str(last_error)[:100] if last_error else '未知错误'}")
+    final_error = str(last_error) if last_error else '未知错误'
+    logger.error(f"❌ 爬取最终失败 {url}: {final_error[:100]}")
+    update_article_status(article_id, 'ERROR', final_error)
     return False
 
 async def crawl_article(article: dict, crawler=None, semaphore=None) -> bool:
@@ -170,7 +209,10 @@ async def crawl_article(article: dict, crawler=None, semaphore=None) -> bool:
 
 async def crawl_all_articles():
     """爬取所有文章 - 优化版本：并发爬取 + 重试机制"""
-    global _crawl_progress
+    global _crawl_progress, _stop_signal
+    
+    # 重置停止信号
+    _stop_signal = False
     
     articles = get_all_articles()
     if not articles:
@@ -217,6 +259,9 @@ async def crawl_all_articles():
     # 创建爬取任务列表
     async def crawl_with_progress(article: dict, index: int):
         """带进度更新的爬取任务"""
+        if _stop_signal:
+            return False
+            
         try:
             result = await crawl_article_with_retry(
                 article, 

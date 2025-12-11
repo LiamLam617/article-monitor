@@ -10,12 +10,20 @@ from datetime import datetime
 from .database import (
     init_db, add_article, get_all_articles, get_read_counts,
     delete_article, get_latest_read_count, get_setting, set_setting,
-    add_read_count
+    add_read_count, get_platform_health, get_platform_failures
 )
 from .extractors import extract_read_count
 from .scheduler import start_scheduler
 from urllib.parse import urlparse
 from .config import FLASK_HOST, FLASK_PORT, FLASK_DEBUG, SUPPORTED_SITES, CRAWL_INTERVAL_HOURS
+
+
+def normalize_url(url: str) -> str:
+    """規範化 URL，修正已知平台的非標準格式"""
+    # 掘金: spost -> post
+    if 'juejin.cn' in url:
+        url = url.replace('/spost/', '/post/')
+    return url
 
 app = Flask(__name__)
 CORS(app)
@@ -55,8 +63,8 @@ def create_articles_batch():
     if not urls:
         return jsonify({'success': False, 'error': 'URL列表不能为空'}), 400
     
-    # 去重并过滤空值
-    urls = list(set([u.strip() for u in urls if u.strip()]))
+    # 去重、過濾空值、規範化 URL
+    urls = list(set([normalize_url(u.strip()) for u in urls if u.strip()]))
     
     if not urls:
         return jsonify({'success': False, 'error': '有效URL不能为空'}), 400
@@ -180,7 +188,7 @@ def create_articles_batch():
 def create_article():
     """添加文章"""
     data = request.json
-    url = data.get('url', '').strip()
+    url = normalize_url(data.get('url', '').strip())
     
     if not url:
         return jsonify({'success': False, 'error': 'URL不能为空'}), 400
@@ -312,6 +320,16 @@ def manual_crawl():
         thread = threading.Thread(target=crawl_all_sync)
         thread.start()
         return jsonify({'success': True, 'message': '爬取任务已启动'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/crawl/stop', methods=['POST'])
+def stop_crawl():
+    """停止爬取"""
+    try:
+        from .crawler import stop_crawling
+        stop_crawling()
+        return jsonify({'success': True, 'message': '正在停止爬取...'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -537,6 +555,177 @@ def export_all_csv():
                 'Content-Type': 'text/csv; charset=utf-8-sig'
             }
         )
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/monitor/health', methods=['GET'])
+def get_system_health():
+    """获取系统健康状态"""
+    try:
+        import psutil
+        import socket
+        import time
+        from datetime import datetime, timedelta
+        
+        # 1. 系统资源
+        # 首次调用 cpu_percent 会返回 0，所以这里只是获取当前瞬时状态
+        cpu_percent = psutil.cpu_percent(interval=None) 
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage('.')
+        
+        system_status = {
+            'cpu': {
+                'percent': cpu_percent,
+                'count': psutil.cpu_count()
+            },
+            'memory': {
+                'total': memory.total,
+                'available': memory.available,
+                'percent': memory.percent
+            },
+            'disk': {
+                'total': disk.total,
+                'free': disk.free,
+                'percent': disk.percent
+            }
+        }
+        
+        # 2. 平台健康度
+        platforms = get_platform_health()
+        failures = get_platform_failures()
+        
+        # 按平台分组失败记录
+        failures_by_site = {}
+        for f in failures:
+            site = f['site'] or '其他'
+            if site not in failures_by_site:
+                failures_by_site[site] = []
+            # 只保留最近5条
+            if len(failures_by_site[site]) < 5:
+                failures_by_site[site].append({
+                    'id': f['id'],
+                    'title': f['title'] or f['url'],
+                    'url': f['url'],
+                    'error': f['last_error'],
+                    'time': f['last_crawl_time']
+                })
+
+        crawl_interval = int(get_setting('crawl_interval_hours', str(CRAWL_INTERVAL_HOURS)))
+        
+        platform_status = []
+        now = datetime.now()
+        
+        for p in platforms:
+            site = p['site'] or '其他'
+            last_update = p['last_update']
+            article_count = p['article_count']
+            
+            status = 'ok'
+            msg = '正常'
+            site_failures = failures_by_site.get(site, [])
+            
+            if not last_update:
+                status = 'unknown'
+                msg = '无数据'
+                # 如果没有文章，也算是正常
+                if article_count == 0:
+                    status = 'ok'
+                    msg = '无文章'
+            else:
+                try:
+                    last_dt = datetime.strptime(last_update, '%Y-%m-%d %H:%M:%S')
+                    diff_hours = (now - last_dt).total_seconds() / 3600
+                    
+                    # 判断逻辑：
+                    # 警告：超过爬取间隔的 2 倍
+                    # 错误：超过爬取间隔的 4 倍
+                    if diff_hours > crawl_interval * 4:
+                        status = 'error'
+                        msg = f'严重延迟 ({int(diff_hours)}小时)'
+                    elif diff_hours > crawl_interval * 2:
+                        status = 'warning'
+                        msg = f'延迟 ({int(diff_hours)}小时)'
+                except:
+                    status = 'unknown'
+                    msg = '时间格式错误'
+            
+            # 如果有失败记录，且状态目前是ok，则升级为warning
+            if site_failures and status == 'ok':
+                status = 'warning'
+                msg = f'有 {len(site_failures)} 篇失败'
+            elif site_failures:
+                 msg += f', {len(site_failures)} 篇失败'
+
+            platform_status.append({
+                'site': site,
+                'status': status,
+                'message': msg,
+                'last_update': last_update,
+                'article_count': article_count,
+                'failures': site_failures
+            })
+            
+        # 3. 网络连通性 (并发检查)
+        import concurrent.futures
+        
+        def check_conn(host, port=443):
+            try:
+                start = time.time()
+                socket.create_connection((host, port), timeout=3)
+                return {'ok': True, 'latency': int((time.time() - start) * 1000)}
+            except:
+                return {'ok': False, 'latency': 0}
+        
+        # 准备检查列表
+        targets = [('互联网连通性', 'www.baidu.com')]
+        for domain, name in SUPPORTED_SITES.items():
+            targets.append((name, domain))
+            
+        network_results = {}
+        
+        # 使用线程池并发检查，避免阻塞
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            future_to_target = {
+                executor.submit(check_conn, domain, 443): (name, domain) 
+                for name, domain in targets
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_target):
+                name, domain = future_to_target[future]
+                try:
+                    result = future.result()
+                    network_results[domain] = {
+                        'name': name,
+                        'host': domain,
+                        'status': result
+                    }
+                except Exception:
+                    network_results[domain] = {
+                        'name': name,
+                        'host': domain,
+                        'status': {'ok': False, 'latency': 0}
+                    }
+        
+        # 排序：互联网连通性第一，其他按字母
+        sorted_network = []
+        if 'www.baidu.com' in network_results:
+             sorted_network.append(network_results.pop('www.baidu.com'))
+             
+        for domain in sorted(network_results.keys()):
+            sorted_network.append(network_results[domain])
+                
+        return jsonify({
+            'success': True,
+            'data': {
+                'system': system_status,
+                'platforms': platform_status,
+                'network': sorted_network,
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+        })
         
     except Exception as e:
         import traceback

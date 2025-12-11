@@ -36,10 +36,7 @@ def start_scheduler():
     
     scheduler.start()
     logger.info(f"定时任务已启动，每 {interval_hours} 小时执行一次")
-    
-    # 立即执行一次
-    logger.info("立即执行首次爬取...")
-    crawl_all_sync()
+
 
 def update_schedule():
     """更新定时任务间隔"""

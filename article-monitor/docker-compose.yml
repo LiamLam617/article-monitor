@@ -47,7 +47,6 @@ services:
         max-size: "10m"
         max-file: "3"
 
-    # 健康检查 (与 Dockerfile 保持一致，使用 curl)
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/"]
       interval: 30s

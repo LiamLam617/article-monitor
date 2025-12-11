@@ -64,8 +64,52 @@ def init_db():
             INSERT INTO settings (key, value) VALUES (?, ?)
         ''', ('crawl_interval_hours', str(CRAWL_INTERVAL_HOURS)))
     
+    # 检查并添加新字段（用于记录爬取状态）
+    cursor.execute("PRAGMA table_info(articles)")
+    columns = [info['name'] for info in cursor.fetchall()]
+    
+    if 'last_status' not in columns:
+        cursor.execute('ALTER TABLE articles ADD COLUMN last_status TEXT DEFAULT "PENDING"')
+    if 'last_error' not in columns:
+        cursor.execute('ALTER TABLE articles ADD COLUMN last_error TEXT')
+    if 'last_crawl_time' not in columns:
+        cursor.execute('ALTER TABLE articles ADD COLUMN last_crawl_time TIMESTAMP')
+        
     conn.commit()
     conn.close()
+
+def update_article_status(article_id: int, status: str, error: Optional[str] = None):
+    """更新文章爬取状态
+    
+    Args:
+        article_id: 文章ID
+        status: 'OK' 或 'ERROR'
+        error: 错误信息（如果是ERROR）
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE articles 
+        SET last_status = ?, last_error = ?, last_crawl_time = datetime('now', 'localtime')
+        WHERE id = ?
+    ''', (status, error, article_id))
+    conn.commit()
+    conn.close()
+
+def get_platform_failures() -> List[Dict]:
+    """获取各平台最近的失败记录"""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT 
+            id, title, url, site, last_error, last_crawl_time
+        FROM articles 
+        WHERE last_status = 'ERROR'
+        ORDER BY last_crawl_time DESC
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 def add_article(url: str, title: Optional[str] = None, site: Optional[str] = None) -> int:
     """添加文章，返回文章ID"""
@@ -372,4 +416,26 @@ def clear_cache(days: int = None, before_date: str = None) -> int:
     conn.commit()
     conn.close()
     return deleted_count
+
+def get_platform_health() -> List[Dict]:
+    """獲取各平台健康狀態（基於最新爬取時間）
+    
+    Returns:
+        包含 site, last_update, article_count 的列表
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    # 獲取每個平台最新的一條記錄的時間
+    cursor.execute('''
+        SELECT 
+            a.site,
+            MAX(rc.timestamp) as last_update,
+            COUNT(DISTINCT a.id) as article_count
+        FROM articles a
+        LEFT JOIN read_counts rc ON a.id = rc.article_id
+        GROUP BY a.site
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 

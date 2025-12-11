@@ -428,7 +428,14 @@ async def extract_with_config_full(url: str, platform: str, crawler: Optional[As
             if count is not None and count > 0:
                 return (count, article_title)
         
-        # 方法2: 从 SOHU_PV_COUNT 标记提取（搜狐专用）
+        # 方法2: 从 SOHU_READ_COUNT 标记提取（搜狐专用，支持 HTML 注释格式）
+        sohu_match = re.search(r'SOHU_READ_COUNT:([\d,]+)', html)
+        if sohu_match:
+            count = _parse_number(sohu_match.group(1), parse_method)
+            if count is not None and count > 0:
+                return (count, article_title)
+        
+        # 方法3: 从 SOHU_PV_COUNT 标记提取（搜狐专用）
         sohu_pv_match = re.search(r'SOHU_PV_COUNT:(\d+)', html)
         if sohu_pv_match:
             count = _parse_number(sohu_pv_match.group(1), parse_method)

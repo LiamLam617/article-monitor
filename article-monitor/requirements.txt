@@ -1,10 +1,5 @@
-# Core dependencies
-flask>=3.0.0
-flask-cors>=4.0.0
-apscheduler>=3.10.0
-crawl4ai>=0.7.4
-
-# Development dependencies (optional)
-# Install with: pip install -e ".[dev]"
-# Or directly: pip install -r requirements-dev.txt
-
+flask
+flask-cors
+crawl4ai
+apscheduler
+psutil

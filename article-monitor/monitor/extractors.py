@@ -1,13 +1,15 @@
 """
 阅读数提取器 - 配置化版本：使用配置文件定义提取规则
 集成防反爬功能：User-Agent 轮换、隐身模式、随机延迟
+优化：预编译正则表达式，提升匹配速度
 """
 import re
 import logging
-from typing import Optional, Dict
+import asyncio
+from typing import Optional, Dict, Any
 from urllib.parse import urlparse
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
-import asyncio
+from functools import lru_cache
 from .config import (
     PLATFORM_EXTRACTORS,
     ANTI_SCRAPING_ENABLED,
@@ -19,8 +21,6 @@ from .config import (
 )
 from .anti_scraping import (
     get_anti_scraping_manager,
-    get_random_user_agent,
-    get_random_viewport,
     AntiScrapingManager
 )
 
@@ -72,6 +72,14 @@ def _get_browser_config() -> BrowserConfig:
             verbose=False
         )
 
+def get_browser_config() -> BrowserConfig:
+    """获取浏览器配置（公开接口，供其他模块使用）"""
+    return _get_browser_config()
+
+def ensure_browser_config() -> BrowserConfig:
+    """确保浏览器配置已初始化（公开接口，供其他模块使用）"""
+    return _ensure_browser_config()
+
 
 # 共享的浏览器配置（复用，避免重复创建）
 # 注意：这里使用函数动态生成，支持防反爬
@@ -96,11 +104,22 @@ _DEFAULT_CRAWLER_CONFIG = CrawlerRunConfig(
 
 
 async def create_shared_crawler():
-    """创建共享的浏览器实例（支持防反爬）"""
-    # 每次创建时生成新的浏览器配置（如果启用了 UA 轮换）
+    """创建共享的浏览器实例（支持防反爬）
+    
+    优化：优先从浏览器池获取，如果池已满则创建独立实例
+    """
+    from .browser_pool import get_browser_pool
+    browser_pool = get_browser_pool()
+    
+    # 尝试从池中获取
+    crawler = await browser_pool.acquire()
+    if crawler:
+        return crawler
+    
+    # 池已满，创建独立实例
     if ANTI_SCRAPING_ENABLED and ANTI_SCRAPING_ROTATE_UA:
         browser_config = _get_browser_config()
-        logger.debug(f"🛡️ 创建防反爬浏览器实例")
+        logger.debug(f"🛡️ 创建防反爬浏览器实例（独立）")
     else:
         browser_config = _ensure_browser_config()
     
@@ -181,6 +200,11 @@ async def _crawl_with_shared(url: str, crawler: AsyncWebCrawler, crawler_config:
         logger.debug(f"爬取失败 {url}: {e}")
         return None
 
+@lru_cache(maxsize=None)  # 无界缓存，因为模式数量有限且固定
+def _compile_pattern(pattern: str) -> re.Pattern:
+    """编译正则表达式（缓存编译结果，提升性能）"""
+    return re.compile(pattern, re.IGNORECASE | re.DOTALL)
+
 def _parse_number(text: str, method: str = 'number') -> Optional[int]:
     """根据指定方法解析数字
     
@@ -213,8 +237,22 @@ def _parse_number(text: str, method: str = 'number') -> Optional[int]:
         return None
 
 
+# 预编译标题提取的正则表达式（优化性能）
+_TITLE_PATTERNS = {
+    'title': re.compile(r'<title[^>]*>([^<]+)</title>', re.IGNORECASE),
+    'h1': re.compile(r'<h1[^>]*>([^<]+)</h1>', re.IGNORECASE | re.DOTALL),
+    'og_title1': re.compile(r'<meta[^>]*property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']', re.IGNORECASE),
+    'og_title2': re.compile(r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:title["\']', re.IGNORECASE),
+}
+_TITLE_SUFFIX_PATTERNS = [
+    re.compile(r'\s*[-|_–—]\s*(掘金|CSDN|博客园|51CTO|SegmentFault|简书|电子发烧友|与非网).*$', re.IGNORECASE),
+    re.compile(r'\s*[-|_–—]\s*.*博客.*$', re.IGNORECASE),
+    re.compile(r'\s*[-|_–—]\s*.*技术.*$', re.IGNORECASE),
+]
+_HTML_TAG_PATTERN = re.compile(r'<[^>]+>')
+
 def _extract_title_from_html(html: str) -> Optional[str]:
-    """从 HTML 中提取文章标题
+    """从 HTML 中提取文章标题（优化：使用预编译正则表达式）
     
     优先级：
     1. <title> 标签
@@ -225,36 +263,31 @@ def _extract_title_from_html(html: str) -> Optional[str]:
         return None
     
     # 1. 尝试从 <title> 标签提取
-    title_match = re.search(r'<title[^>]*>([^<]+)</title>', html, re.IGNORECASE)
+    title_match = _TITLE_PATTERNS['title'].search(html)
     if title_match:
         title = title_match.group(1).strip()
-        # 清理常见的网站后缀
-        suffixes_to_remove = [
-            r'\s*[-|_–—]\s*(掘金|CSDN|博客园|51CTO|SegmentFault|简书|电子发烧友|与非网|FreeBuf).*$',
-            r'\s*[-|_–—]\s*.*博客.*$',
-            r'\s*[-|_–—]\s*.*技术.*$',
-        ]
-        for suffix in suffixes_to_remove:
-            title = re.sub(suffix, '', title, flags=re.IGNORECASE)
+        # 清理常见的网站后缀（使用预编译正则）
+        for suffix_pattern in _TITLE_SUFFIX_PATTERNS:
+            title = suffix_pattern.sub('', title)
         if title:
             return title.strip()
     
     # 2. 尝试从 <h1> 标签提取
-    h1_match = re.search(r'<h1[^>]*>([^<]+)</h1>', html, re.IGNORECASE | re.DOTALL)
+    h1_match = _TITLE_PATTERNS['h1'].search(html)
     if h1_match:
         title = h1_match.group(1).strip()
         # 移除 HTML 标签
-        title = re.sub(r'<[^>]+>', '', title)
+        title = _HTML_TAG_PATTERN.sub('', title)
         if title:
             return title.strip()
     
     # 3. 尝试从 og:title meta 标签提取
-    og_match = re.search(r'<meta[^>]*property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    og_match = _TITLE_PATTERNS['og_title1'].search(html)
     if og_match:
         return og_match.group(1).strip()
     
     # 反向匹配 og:title
-    og_match2 = re.search(r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']og:title["\']', html, re.IGNORECASE)
+    og_match2 = _TITLE_PATTERNS['og_title2'].search(html)
     if og_match2:
         return og_match2.group(1).strip()
     
@@ -296,6 +329,10 @@ async def extract_with_config_full(url: str, platform: str, crawler: Optional[As
     
     config = PLATFORM_EXTRACTORS[platform]
     patterns = config.get('patterns', [])
+    # 预编译正则表达式（提升性能）
+    # HTML 使用 DOTALL 模式（支持跨行匹配），markdown 不使用
+    compiled_patterns_html = [_compile_pattern(p) for p in patterns]
+    compiled_patterns_markdown = [re.compile(p, re.IGNORECASE) for p in patterns]
     wait_for = config.get('wait_for')
     timeout = config.get('timeout', 20000)
     parse_method = config.get('parse_method', 'number')
@@ -311,51 +348,7 @@ async def extract_with_config_full(url: str, platform: str, crawler: Optional[As
     # 平台特定的 JavaScript 提取逻辑
     platform_js = ""
     if config.get('js_extract', False):
-        if platform == 'freebuf':
-            platform_js = """
-            (() => {
-                // 首先检测是否有验证码弹窗
-                const captchaTexts = ['访问验证', '请按住滑块', '拖动到最右边', '滑块验证'];
-                const pageText = document.body.innerText || '';
-                for (const text of captchaTexts) {
-                    if (pageText.includes(text)) {
-                        document.title = 'CAPTCHA_DETECTED';
-                        console.log('FreeBuf captcha detected');
-                        return null;
-                    }
-                }
-                
-                // 尝试多种选择器查找阅读数
-                const selectors = ['.review', '.article-info .fire', '[class*="review"]', '[class*="fire"]'];
-                let reviewEl = null;
-                for (const sel of selectors) {
-                    reviewEl = document.querySelector(sel);
-                    if (reviewEl) break;
-                }
-                
-                if (!reviewEl) {
-                    console.log('FreeBuf: review element not found');
-                    return null;
-                }
-                
-                const text = (reviewEl.textContent || reviewEl.innerText || '').trim();
-                // 查找至少3位的数字（排除 SVG path 中的小数字）
-                const numbers = text.match(/\\b([\\d,]{3,})\\b/g);
-                if (numbers && numbers.length > 0) {
-                    // 选择最大的数字（最可能是阅读数）
-                    const maxNum = numbers.reduce((a, b) => {
-                        const numA = parseInt(a.replace(/,/g, ''));
-                        const numB = parseInt(b.replace(/,/g, ''));
-                        return numA > numB ? a : b;
-                    });
-                    // 写入页面标题，方便后续提取
-                    document.title = 'READ_COUNT:' + maxNum;
-                    return maxNum;
-                }
-                return null;
-            })();
-            """
-        elif platform == 'sohu':
+        if platform == 'sohu':
             # 搜狐：wait_for 已确保数字加载完成，这里直接提取并注入标记
             platform_js = """
             (() => {
@@ -396,20 +389,21 @@ async def extract_with_config_full(url: str, platform: str, crawler: Optional[As
         if result is None:
             return (None, None)
     else:
-        async with AsyncWebCrawler(config=_SHARED_BROWSER_CONFIG) as crawler_instance:
+        # 确保浏览器配置已初始化
+        browser_config = _ensure_browser_config()
+        async with AsyncWebCrawler(config=browser_config) as crawler_instance:
             result = await crawler_instance.arun(url, config=crawler_config)
             if not result.success:
                 return (None, None)
     
     # 如果配置了额外延迟，等待 JavaScript 渲染
     if delay_before_return > 0:
-        import asyncio
         await asyncio.sleep(delay_before_return / 1000.0)  # 转换为秒
     
     html = result.html
     markdown = result.markdown or ''
     
-    # 检测验证码（FreeBuf 等网站的反爬机制）
+    # 检测验证码（部分网站的反爬机制）
     captcha_indicators = ['访问验证', '请按住滑块', '拖动到最右边', '滑块验证', 'CAPTCHA_DETECTED']
     for indicator in captcha_indicators:
         if indicator in html:
@@ -419,7 +413,7 @@ async def extract_with_config_full(url: str, platform: str, crawler: Optional[As
     # 提前提取文章标题
     article_title = _extract_title_from_html(html)
     
-    # 如果配置了 JavaScript 提取，优先从标记中提取（支持 freebuf, sohu 等）
+    # 如果配置了 JavaScript 提取，优先从标记中提取（支持 sohu 等）
     if js_extract:
         # 方法1: 从 READ_COUNT 标记提取
         title_match = re.search(r'READ_COUNT:([\d,]+)', html)
@@ -442,130 +436,31 @@ async def extract_with_config_full(url: str, platform: str, crawler: Optional[As
             if count is not None and count > 0:
                 return (count, article_title)
     
-    # 对于 freebuf，尝试使用 JavaScript 直接从 DOM 提取
-    if platform == 'freebuf' and hasattr(result, 'page') and result.page:
-        try:
-            # 使用 JavaScript 提取 .review 元素中的数字
-            js_code = """
-            () => {
-                const reviewEl = document.querySelector('.review');
-                if (!reviewEl) return null;
-                const text = reviewEl.textContent || reviewEl.innerText;
-                const match = text.match(/([\\d,]+)/);
-                return match ? match[1] : null;
-            }
-            """
-            # 注意：这里需要访问 page 对象，但 crawl4ai 可能不直接暴露
-            # 先尝试从 HTML 提取，如果失败再考虑其他方法
-        except:
-            pass
-    
-    # 按优先级尝试每个模式
-    for pattern in patterns:
-        # 先在 HTML 中查找（使用 DOTALL 以匹配跨行内容）
-        match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
+    # 按优先级尝试每个模式（使用预编译的正则表达式）
+    for i, compiled_pattern_html in enumerate(compiled_patterns_html):
+        # 先在 HTML 中查找
+        match = compiled_pattern_html.search(html)
         if match:
             text = match.group(1).strip()  # 去除首尾空白
             count = _parse_number(text, parse_method)
             if count is not None and count > 0:  # 确保不是 0
                 return (count, article_title)
         
-        # 如果 HTML 中没找到，尝试在 markdown 中查找
+        # 如果 HTML 中没找到，尝试在 markdown 中查找（使用对应的预编译模式）
         if markdown:
-            match = re.search(pattern, markdown, re.IGNORECASE)
+            compiled_pattern_md = compiled_patterns_markdown[i]
+            match = compiled_pattern_md.search(markdown)
             if match:
                 text = match.group(1)
                 count = _parse_number(text, parse_method)
                 if count is not None and count > 0:  # 确保不是 0
                     return (count, article_title)
     
-    # 对于 freebuf，如果所有模式都失败，尝试使用 JavaScript 从 DOM 提取
-    if platform == 'freebuf':
-        # 如果 HTML 中没有找到数字，尝试使用 JavaScript 直接从 DOM 提取
-        # 这需要重新访问页面，但可以获取渲染后的内容
-        if crawler:
-            try:
-                # 使用 JavaScript 提取
-                js_code = """
-                () => {
-                    const reviewEl = document.querySelector('.review');
-                    if (!reviewEl) return null;
-                    const text = reviewEl.textContent || reviewEl.innerText || '';
-                    // 查找数字（排除 SVG path 中的数字）
-                    const match = text.match(/\\s([\\d,]{3,})\\s/);
-                    return match ? match[1] : null;
-                }
-                """
-                js_config = CrawlerRunConfig(
-                    page_timeout=timeout,
-                    wait_for=wait_for,
-                    remove_overlay_elements=True,
-                    screenshot=False,
-                    js_code=js_code
-                )
-                # 重新爬取页面，使用 JavaScript 提取数字
-                js_result = await _crawl_with_shared(url, crawler, js_config)
-                if js_result and js_result.success:
-                    # 从标题中提取数字（JavaScript 写入的）
-                    js_html = js_result.html
-                    title_match = re.search(r'<title[^>]*>READ_COUNT:([\d,]+)</title>', js_html, re.IGNORECASE)
-                    if title_match:
-                        count = _parse_number(title_match.group(1), parse_method)
-                        if count is not None and count > 0:
-                            return (count, article_title)
-                    # 如果标题中没有，尝试从整个 HTML 中搜索
-                    title_match = re.search(r'READ_COUNT:([\d,]+)', js_html)
-                    if title_match:
-                        count = _parse_number(title_match.group(1), parse_method)
-                        if count is not None and count > 0:
-                            return (count, article_title)
-                    # 尝试从 extracted_content 获取
-                    if hasattr(js_result, 'extracted_content') and js_result.extracted_content:
-                        try:
-                            import json
-                            js_data = json.loads(js_result.extracted_content)
-                            if js_data:
-                                count = _parse_number(js_data, parse_method)
-                                if count is not None and count > 0:
-                                    return (count, article_title)
-                        except:
-                            pass
-                    # 如果 extracted_content 没有，从 HTML 中提取
-                    js_html = js_result.html
-                    review_section = re.search(r'class="review"[^>]*>.*?</span>', js_html, re.IGNORECASE | re.DOTALL)
-                    if review_section:
-                        section = review_section.group(0)
-                        # 尝试匹配数字
-                        num_match = re.search(r'</i>\s*([\d,]+)\s+</span>', section, re.IGNORECASE | re.DOTALL)
-                        if num_match:
-                            count = _parse_number(num_match.group(1), parse_method)
-                            if count is not None and count > 0:
-                                return (count, article_title)
-            except:
-                pass
-        
-        # 最后的备选方案：在整个 HTML 中搜索 .review 元素附近的数字
-        review_section = re.search(r'class="review"[^>]*>.*?</span>', html, re.IGNORECASE | re.DOTALL)
-        if review_section:
-            section = review_section.group(0)
-            # 优先查找 </i> 和 </span> 之间的数字（最可能的位置）
-            patterns_to_try = [
-                r'</i>\s*([\d,]+)\s+</span>',  # 数字后必须有空白字符
-                r'</i>\s*([\d,]+)\s*</span>',  # 数字后可以有或没有空白字符
-            ]
-            
-            for pattern in patterns_to_try:
-                between_i_and_span = re.search(pattern, section, re.IGNORECASE | re.DOTALL)
-                if between_i_and_span:
-                    num_str = between_i_and_span.group(1)
-                    count = _parse_number(num_str, parse_method)
-                    if count is not None and count > 0:
-                        return (count, article_title)
-    
+    # 如果所有模式都失败，返回 None
     return (None, article_title)
 
 
-async def extract_article_info(url: str, crawler: Optional[AsyncWebCrawler] = None) -> Dict[str, any]:
+async def extract_article_info(url: str, crawler: Optional[AsyncWebCrawler] = None) -> Dict[str, Any]:
     """提取文章信息（阅读数和标题）
     
     Args:
@@ -575,23 +470,13 @@ async def extract_article_info(url: str, crawler: Optional[AsyncWebCrawler] = No
     Returns:
         包含 'read_count' 和 'title' 的字典
     """
+    from .config import SUPPORTED_SITES
+    
     domain = urlparse(url).netloc.lower()
     
-    # 根据域名匹配平台
+    # 根据域名匹配平台（使用配置文件中的映射）
     platform = None
-    for site_domain, site_name in {
-        'juejin.cn': 'juejin',
-        'csdn.net': 'csdn',
-        'cnblogs.com': 'cnblog',
-        '51cto.com': '51cto',
-        'segmentfault.com': 'segmentfault',
-        'jianshu.com': 'jinshu',
-        'elecfans.com': 'elecfans',
-        'china.com': 'MBB',
-        'eefocus.com': 'eefocus',
-        'freebuf.com': 'freebuf',
-        'sohu.com': 'sohu'
-    }.items():
+    for site_domain, site_name in SUPPORTED_SITES.items():
         if site_domain in domain:
             platform = site_name
             break

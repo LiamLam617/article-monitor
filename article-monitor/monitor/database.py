@@ -10,10 +10,22 @@ from .config import DATABASE_PATH
 # 确保数据目录存在
 os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
 
+def _apply_db_optimizations(conn: sqlite3.Connection):
+    """应用数据库性能优化设置（每次新连接都需要设置）"""
+    # 启用 WAL 模式，提升并发读写性能（持久化，但每次连接仍需设置以确保）
+    conn.execute('PRAGMA journal_mode=WAL')
+    # 优化性能设置（每次连接都需要设置）
+    conn.execute('PRAGMA synchronous=NORMAL')  # 平衡性能和安全性
+    conn.execute('PRAGMA cache_size=-64000')  # 64MB 缓存（负值表示 KB）
+    conn.execute('PRAGMA temp_store=MEMORY')  # 临时表存储在内存中
+    # 其他优化
+    conn.execute('PRAGMA foreign_keys=ON')  # 启用外键约束
+
 def get_db():
-    """获取数据库连接"""
-    conn = sqlite3.connect(DATABASE_PATH)
+    """获取数据库连接（优化：启用 WAL 模式提升并发性能）"""
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30.0)
     conn.row_factory = sqlite3.Row
+    _apply_db_optimizations(conn)
     return conn
 
 def init_db():
@@ -79,12 +91,12 @@ def init_db():
     conn.close()
 
 def update_article_status(article_id: int, status: str, error: Optional[str] = None):
-    """更新文章爬取状态
+    """更新文章爬取状态（优化：支持 PENDING 状态）
     
     Args:
         article_id: 文章ID
-        status: 'OK' 或 'ERROR'
-        error: 错误信息（如果是ERROR）
+        status: 'OK'、'ERROR' 或 'PENDING'
+        error: 错误信息（如果是 ERROR 或 PENDING）
     """
     conn = get_db()
     cursor = conn.cursor()
@@ -97,19 +109,103 @@ def update_article_status(article_id: int, status: str, error: Optional[str] = N
     conn.close()
 
 def get_platform_failures() -> List[Dict]:
-    """获取各平台最近的失败记录"""
+    """获取各平台最近的失败记录（优化：包括 PENDING 状态）"""
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
         SELECT 
             id, title, url, site, last_error, last_crawl_time
         FROM articles 
-        WHERE last_status = 'ERROR'
+        WHERE last_status = 'ERROR' OR (last_status = 'PENDING' AND last_error IS NOT NULL)
         ORDER BY last_crawl_time DESC
     ''')
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+def get_all_failures(limit: int = 100, site: Optional[str] = None) -> List[Dict]:
+    """获取所有失败记录（支持分页和平台筛选）
+    
+    Args:
+        limit: 返回记录数限制
+        site: 平台筛选（可选）
+        
+    Returns:
+        失败记录列表（包括 ERROR 状态和最近爬取失败但状态未更新的文章）
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # 优化：不仅查询 ERROR 状态，还查询最近爬取失败但可能状态未及时更新的文章
+    # 条件：last_status = 'ERROR' 或者 (last_status != 'OK' 且有 last_error)
+    if site:
+        cursor.execute('''
+            SELECT 
+                id, title, url, site, last_error, last_crawl_time, last_status
+            FROM articles 
+            WHERE (last_status = 'ERROR' OR (last_status != 'OK' AND last_error IS NOT NULL))
+            AND site = ?
+            ORDER BY last_crawl_time DESC, id DESC
+            LIMIT ?
+        ''', (site, limit))
+    else:
+        cursor.execute('''
+            SELECT 
+                id, title, url, site, last_error, last_crawl_time, last_status
+            FROM articles 
+            WHERE last_status = 'ERROR' OR (last_status != 'OK' AND last_error IS NOT NULL)
+            ORDER BY last_crawl_time DESC, id DESC
+            LIMIT ?
+        ''', (limit,))
+    
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+def get_failure_stats() -> Dict:
+    """获取失败统计信息（优化：包括所有失败状态）
+    
+    Returns:
+        包含总数、按平台分组等统计信息
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # 总失败数（包括 ERROR 状态和最近失败但状态未及时更新的）
+    cursor.execute('''
+        SELECT COUNT(*) as count 
+        FROM articles 
+        WHERE last_status = 'ERROR' OR (last_status != 'OK' AND last_error IS NOT NULL)
+    ''')
+    total = cursor.fetchone()['count']
+    
+    # 按平台分组统计
+    cursor.execute('''
+        SELECT 
+            site, COUNT(*) as count
+        FROM articles 
+        WHERE last_status = 'ERROR' OR (last_status != 'OK' AND last_error IS NOT NULL)
+        GROUP BY site
+        ORDER BY count DESC
+    ''')
+    by_site = {row['site']: row['count'] for row in cursor.fetchall()}
+    
+    # 最近24小时失败数
+    cursor.execute('''
+        SELECT COUNT(*) as count
+        FROM articles 
+        WHERE (last_status = 'ERROR' OR (last_status != 'OK' AND last_error IS NOT NULL))
+        AND last_crawl_time >= datetime('now', '-24 hours')
+    ''')
+    recent_24h = cursor.fetchone()['count']
+    
+    conn.close()
+    
+    return {
+        'total': total,
+        'by_site': by_site,
+        'recent_24h': recent_24h
+    }
 
 def add_article(url: str, title: Optional[str] = None, site: Optional[str] = None) -> int:
     """添加文章，返回文章ID"""
@@ -141,14 +237,38 @@ def get_all_articles() -> List[Dict]:
     conn.close()
     return [dict(row) for row in rows]
 
-def get_article_by_url(url: str) -> Optional[Dict]:
-    """根据URL获取文章"""
+def get_all_articles_with_latest_count() -> List[Dict]:
+    """获取所有文章及其最新阅读数（批量查询，避免N+1问题）"""
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM articles WHERE url = ?', (url,))
-    row = cursor.fetchone()
+    # 使用 LEFT JOIN 和子查询一次性获取所有数据
+    cursor.execute('''
+        SELECT 
+            a.*,
+            rc.count as latest_count,
+            rc.timestamp as latest_timestamp
+        FROM articles a
+        LEFT JOIN (
+            SELECT 
+                article_id,
+                count,
+                timestamp,
+                ROW_NUMBER() OVER (PARTITION BY article_id ORDER BY timestamp DESC, id DESC) as rn
+            FROM read_counts
+        ) rc ON a.id = rc.article_id AND rc.rn = 1
+        ORDER BY a.created_at DESC
+    ''')
+    rows = cursor.fetchall()
     conn.close()
-    return dict(row) if row else None
+    articles = []
+    for row in rows:
+        article = dict(row)
+        # 处理可能的 None 值
+        if article.get('latest_count') is None:
+            article['latest_count'] = 0
+            article['latest_timestamp'] = None
+        articles.append(article)
+    return articles
 
 def add_read_count(article_id: int, count: int):
     """添加阅读数记录 - 使用本地时间"""
@@ -160,6 +280,81 @@ def add_read_count(article_id: int, count: int):
     )
     conn.commit()
     conn.close()
+
+def add_read_counts_batch(records: List[tuple]):
+    """批量添加阅读数记录（优化性能，使用事务）
+    
+    Args:
+        records: [(article_id, count), ...] 列表
+    """
+    if not records:
+        return
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        # 使用事务批量插入
+        cursor.executemany(
+            "INSERT INTO read_counts (article_id, count, timestamp) VALUES (?, ?, datetime('now', 'localtime'))",
+            records
+        )
+        conn.commit()
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"批量插入 {len(records)} 条阅读数记录")
+    except Exception as e:
+        conn.rollback()
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"批量插入失败: {e}")
+        raise
+    finally:
+        conn.close()
+
+def add_articles_batch(articles: List[tuple]) -> List[int]:
+    """批量添加文章（优化性能，使用事务）
+    
+    Args:
+        articles: [(url, title, site), ...] 列表
+        
+    Returns:
+        文章ID列表（已存在的文章返回现有ID）
+    """
+    if not articles:
+        return []
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    article_ids = []
+    
+    try:
+        for url, title, site in articles:
+            try:
+                cursor.execute(
+                    'INSERT INTO articles (url, title, site) VALUES (?, ?, ?)',
+                    (url, title, site)
+                )
+                article_ids.append(cursor.lastrowid)
+            except sqlite3.IntegrityError:
+                # URL已存在，获取现有ID
+                cursor.execute('SELECT id FROM articles WHERE url = ?', (url,))
+                row = cursor.fetchone()
+                article_ids.append(row['id'] if row else None)
+        
+        conn.commit()
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"批量添加 {len(articles)} 篇文章")
+    except Exception as e:
+        conn.rollback()
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"批量添加文章失败: {e}")
+        raise
+    finally:
+        conn.close()
+    
+    return article_ids
 
 def get_read_counts(article_id: int, limit: int = 100, start_date: str = None, end_date: str = None, group_by_hour: bool = False) -> List[Dict]:
     """获取文章阅读数历史 - 使用timestamp和id双重排序确保稳定性
@@ -218,6 +413,58 @@ def get_latest_read_count(article_id: int) -> Optional[Dict]:
         'SELECT * FROM read_counts WHERE article_id = ? ORDER BY timestamp DESC, id DESC LIMIT 1',
         (article_id,)
     )
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def get_latest_read_counts_batch(article_ids: List[int]) -> Dict[int, Dict]:
+    """批量获取最新阅读数（优化性能）
+    
+    Args:
+        article_ids: 文章ID列表
+        
+    Returns:
+        字典：{article_id: {'count': int, 'timestamp': str}}
+    """
+    if not article_ids:
+        return {}
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    # 使用窗口函数获取每个文章的最新记录
+    placeholders = ','.join(['?'] * len(article_ids))
+    cursor.execute(f'''
+        SELECT 
+            article_id,
+            count,
+            timestamp
+        FROM (
+            SELECT 
+                article_id,
+                count,
+                timestamp,
+                ROW_NUMBER() OVER (PARTITION BY article_id ORDER BY timestamp DESC, id DESC) as rn
+            FROM read_counts
+            WHERE article_id IN ({placeholders})
+        )
+        WHERE rn = 1
+    ''', article_ids)
+    rows = cursor.fetchall()
+    conn.close()
+    
+    result = {}
+    for row in rows:
+        result[row['article_id']] = {
+            'count': row['count'],
+            'timestamp': row['timestamp']
+        }
+    return result
+
+def get_article_by_id(article_id: int) -> Optional[Dict]:
+    """根据ID获取文章信息（优化：避免获取所有文章）"""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM articles WHERE id = ?', (article_id,))
     row = cursor.fetchone()
     conn.close()
     return dict(row) if row else None

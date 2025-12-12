@@ -139,6 +139,214 @@
             background: #999999;
         }
         
+        .btn-small {
+            padding: 4px 12px;
+            font-size: 12px;
+        }
+        
+        /* 任务面板样式 */
+        .task-panel {
+            background: white;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 16px;
+            display: none;
+        }
+        
+        .task-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #e8e8e8;
+        }
+        
+        .task-title {
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .task-content {
+            font-size: 14px;
+        }
+        
+        .task-message {
+            color: #666;
+            margin-bottom: 8px;
+        }
+        
+        .task-status {
+            font-weight: 500;
+            margin-bottom: 8px;
+            color: #333;
+        }
+        
+        .task-progress {
+            width: 100%;
+            height: 8px;
+            background: #e8e8e8;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 8px;
+        }
+        
+        .task-progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #007bff, #0056b3);
+            transition: width 0.3s ease;
+            border-radius: 4px;
+        }
+        
+        .task-details {
+            margin-top: 8px;
+            font-size: 12px;
+            color: #666;
+        }
+        
+        .task-stats {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 4px;
+        }
+        
+        .task-error {
+            color: #dc3545;
+            margin-top: 8px;
+            padding: 8px;
+            background: #f8d7da;
+            border-radius: 4px;
+        }
+        
+        /* 失败列表样式 */
+        .failures-panel {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 20px;
+        }
+        
+        .failures-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid #e8e8e8;
+        }
+        
+        .failures-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .failures-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .failures-stats {
+            display: flex;
+            gap: 24px;
+            margin-bottom: 20px;
+            padding: 12px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+        
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .stat-label {
+            color: #666;
+            font-size: 14px;
+        }
+        
+        .stat-value {
+            font-weight: 600;
+            color: #dc3545;
+            font-size: 16px;
+        }
+        
+        .failures-list {
+            min-height: 200px;
+        }
+        
+        .failure-item {
+            border: 1px solid #e8e8e8;
+            border-radius: 6px;
+            padding: 16px;
+            margin-bottom: 12px;
+            transition: all 0.2s;
+        }
+        
+        .failure-item:hover {
+            border-color: #dc3545;
+            box-shadow: 0 2px 8px rgba(220, 53, 69, 0.1);
+        }
+        
+        .failure-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 12px;
+        }
+        
+        .failure-info {
+            flex: 1;
+        }
+        
+        .failure-title {
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 4px;
+            font-size: 15px;
+        }
+        
+        .failure-title a {
+            color: #007bff;
+            text-decoration: none;
+        }
+        
+        .failure-title a:hover {
+            text-decoration: underline;
+        }
+        
+        .failure-meta {
+            display: flex;
+            gap: 16px;
+            font-size: 12px;
+            color: #999;
+            margin-top: 4px;
+        }
+        
+        .failure-actions {
+            display: flex;
+            gap: 8px;
+        }
+        
+        .failure-error {
+            background: #fff5f5;
+            border-left: 3px solid #dc3545;
+            padding: 10px 12px;
+            margin-top: 8px;
+            border-radius: 4px;
+            font-size: 13px;
+            color: #721c24;
+            word-break: break-word;
+        }
+        
+        .failure-time {
+            color: #999;
+            font-size: 12px;
+        }
+        
         .articles-list {
             background: white;
             border-radius: 8px;
@@ -884,6 +1092,9 @@
         <button class="tab-item" data-tab="monitor" onclick="switchTab('monitor')">
             🖥️ 系统监控
         </button>
+        <button class="tab-item" data-tab="failures" onclick="switchTab('failures')">
+            ❌ 失败列表
+        </button>
     </div>
     
     <div class="container">
@@ -967,6 +1178,37 @@
         <div class="tab-content" id="listTab">
             <div class="articles-list" id="articlesList">
                 <div class="loading">加载中...</div>
+            </div>
+        </div>
+        
+        <!-- 失败列表标签页 -->
+        <div class="tab-content" id="failuresTab">
+            <div class="failures-panel">
+                <div class="failures-header">
+                    <div class="failures-title">❌ 爬取失败列表</div>
+                    <div class="failures-controls">
+                        <select id="failureSiteFilter" onchange="loadFailures()" style="padding: 6px 12px; border: 1px solid #ddd; border-radius: 4px; margin-right: 10px;">
+                            <option value="">所有平台</option>
+                        </select>
+                        <button onclick="loadFailures()" class="btn-small">刷新</button>
+                        <button onclick="retryAllFailures()" class="btn-small secondary">重试全部</button>
+                    </div>
+                </div>
+                
+                <div class="failures-stats" id="failuresStats">
+                    <div class="stat-item">
+                        <span class="stat-label">总失败数:</span>
+                        <span class="stat-value" id="totalFailures">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">最近24小时:</span>
+                        <span class="stat-value" id="recentFailures">0</span>
+                    </div>
+                </div>
+                
+                <div class="failures-list" id="failuresList">
+                    <div class="loading">加载中...</div>
+                </div>
             </div>
         </div>
         
@@ -1102,7 +1344,6 @@
             'juejin': { name: '掘金', color: '#1E80FF' },
             'csdn': { name: 'CSDN', color: '#FC5531' },
             'cnblog': { name: '博客园', color: '#41A317' },
-            'freebuf': { name: 'FreeBuf', color: '#FF6B35' },
             '51cto': { name: '51CTO', color: '#FFA500' },
             'elecfans': { name: '电子发烧友', color: '#FF69B4' },
             'segmentfault': { name: '思否', color: '#26A69A' },
@@ -1134,7 +1375,8 @@
             const tabMap = {
                 'trend': 'trendTab',
                 'list': 'listTab',
-                'monitor': 'monitorTab'
+                'monitor': 'monitorTab',
+                'failures': 'failuresTab'
             };
             
             document.getElementById(tabMap[tabName]).classList.add('active');
@@ -1147,12 +1389,23 @@
                 if (!monitorInterval) {
                     monitorInterval = setInterval(loadMonitorData, 5000);
                 }
+            } else if (tabName === 'failures') {
+                loadFailures();
+                if (!failuresInterval) {
+                    failuresInterval = setInterval(loadFailures, 10000); // 每10秒刷新一次
+                }
             }
             
             // 如果离开监控页，停止轮询
             if (tabName !== 'monitor' && monitorInterval) {
                 clearInterval(monitorInterval);
                 monitorInterval = null;
+            }
+            
+            // 如果离开失败列表页，停止轮询
+            if (tabName !== 'failures' && failuresInterval) {
+                clearInterval(failuresInterval);
+                failuresInterval = null;
             }
         }
         
@@ -1371,7 +1624,10 @@
             return url;
         }
         
-        // 添加文章
+        // 任务状态追踪
+        const activeTasks = new Map(); // taskId -> {interval, element}
+        
+        // 添加文章（支持任务队列）
         async function addArticle() {
             const rawInput = document.getElementById('articleUrl').value;
             const urls = rawInput.split('\n').map(u => normalizeUrl(u.trim())).filter(u => u);
@@ -1383,7 +1639,7 @@
             
             const btn = document.querySelector('button[onclick="addArticle()"]');
             const originalText = btn.innerText;
-            btn.innerText = '添加中...';
+            btn.innerText = '提交中...';
             btn.disabled = true;
             
             try {
@@ -1398,29 +1654,35 @@
                 if (result.success) {
                     document.getElementById('articleUrl').value = '';
                     
-                    // 生成结果报告
-                    const results = result.results;
-                    const successCount = results.filter(r => r.success).length;
-                    const failCount = results.filter(r => !r.success).length;
-                    
-                    let message = `处理完成: ${successCount} 成功`;
-                    if (failCount > 0) {
-                        message += `, ${failCount} 失败`;
+                    // 检查是否有任务ID（大批量处理）
+                    if (result.task_id) {
+                        // 显示任务状态面板
+                        showTaskPanel(result.task_id, result.message);
+                        // 开始轮询任务状态
+                        startTaskPolling(result.task_id);
+                    } else if (result.results) {
+                        // 小批量：直接显示结果
+                        const results = result.results;
+                        const successCount = results.filter(r => r.success).length;
+                        const failCount = results.filter(r => !r.success).length;
+                        
+                        let message = `处理完成: ${successCount} 成功`;
+                        if (failCount > 0) {
+                            message += `, ${failCount} 失败`;
+                        }
+                        
+                        if (failCount > 0) {
+                            const failures = results.filter(r => !r.success).map(r => `${r.url}: ${r.error}`).join('\n');
+                            alert(`${message}\n\n失败详情:\n${failures}`);
+                        } else {
+                            showSuccess(message);
+                        }
+                        
+                        loadArticles();
+                        loadStatistics(currentTimeRange).then(() => {
+                            if (chartData) renderOverviewChart(chartData);
+                        });
                     }
-                    
-                    if (failCount > 0) {
-                        // 显示详细的失败信息
-                        const failures = results.filter(r => !r.success).map(r => `${r.url}: ${r.error}`).join('\n');
-                        alert(`${message}\n\n失败详情:\n${failures}`);
-                    } else {
-                        showSuccess(message);
-                    }
-                    
-                    loadArticles();
-                    // 重新加载统计数据
-                    loadStatistics(currentTimeRange).then(() => {
-                        if (chartData) renderOverviewChart(chartData);
-                    });
                 } else {
                     showError('添加失败: ' + result.error);
                 }
@@ -1429,6 +1691,274 @@
             } finally {
                 btn.innerText = originalText;
                 btn.disabled = false;
+            }
+        }
+        
+        // 显示任务状态面板
+        function showTaskPanel(taskId, message) {
+            // 创建或更新任务面板
+            let panel = document.getElementById('taskPanel');
+            if (!panel) {
+                panel = document.createElement('div');
+                panel.id = 'taskPanel';
+                panel.className = 'task-panel';
+                document.querySelector('.add-article').after(panel);
+            }
+            
+            panel.innerHTML = `
+                <div class="task-header">
+                    <span class="task-title">📋 后台任务</span>
+                    <button class="btn-small secondary" onclick="closeTaskPanel('${taskId}')">关闭</button>
+                </div>
+                <div class="task-content" id="taskContent_${taskId}">
+                    <div class="task-message">${message}</div>
+                    <div class="task-status" id="taskStatus_${taskId}">等待中...</div>
+                    <div class="task-progress" id="taskProgress_${taskId}">
+                        <div class="task-progress-bar" id="taskProgressBar_${taskId}" style="width: 0%"></div>
+                    </div>
+                    <div class="task-details" id="taskDetails_${taskId}"></div>
+                </div>
+            `;
+            
+            panel.style.display = 'block';
+        }
+        
+        // 开始轮询任务状态
+        function startTaskPolling(taskId) {
+            // 如果已经在轮询，先清除
+            if (activeTasks.has(taskId)) {
+                clearInterval(activeTasks.get(taskId).interval);
+            }
+            
+            const pollInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/api/tasks/${taskId}`);
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        updateTaskStatus(taskId, result.data);
+                        
+                        // 如果任务完成或失败，停止轮询
+                        if (['completed', 'failed', 'cancelled'].includes(result.data.status)) {
+                            clearInterval(pollInterval);
+                            activeTasks.delete(taskId);
+                            
+                            // 任务完成时刷新数据
+                            if (result.data.status === 'completed') {
+                                loadArticles();
+                                loadStatistics(currentTimeRange).then(() => {
+                                    if (chartData) renderOverviewChart(chartData);
+                                });
+                            }
+                        }
+                    } else {
+                        // 任务不存在，停止轮询
+                        clearInterval(pollInterval);
+                        activeTasks.delete(taskId);
+                    }
+                } catch (error) {
+                    console.error('轮询任务状态失败:', error);
+                }
+            }, 1000); // 每秒轮询一次
+            
+            activeTasks.set(taskId, { interval: pollInterval });
+        }
+        
+        // 更新任务状态显示
+        function updateTaskStatus(taskId, taskData) {
+            const statusEl = document.getElementById(`taskStatus_${taskId}`);
+            const progressBarEl = document.getElementById(`taskProgressBar_${taskId}`);
+            const detailsEl = document.getElementById(`taskDetails_${taskId}`);
+            
+            if (!statusEl) return;
+            
+            // 更新状态文本
+            const statusText = {
+                'pending': '⏳ 等待中',
+                'running': '🔄 处理中',
+                'completed': '✅ 已完成',
+                'failed': '❌ 失败',
+                'cancelled': '🚫 已取消'
+            };
+            
+            statusEl.textContent = statusText[taskData.status] || taskData.status;
+            
+            // 更新进度条
+            if (taskData.progress && taskData.progress.total) {
+                const progress = (taskData.progress.processed / taskData.progress.total) * 100;
+                progressBarEl.style.width = `${progress}%`;
+                
+                // 更新详细信息
+                detailsEl.innerHTML = `
+                    <div class="task-stats">
+                        <span>已处理: ${taskData.progress.processed || 0} / ${taskData.progress.total}</span>
+                        <span>成功: ${taskData.progress.success || 0}</span>
+                        <span>失败: ${taskData.progress.failed || 0}</span>
+                    </div>
+                `;
+            }
+            
+            // 显示错误信息
+            if (taskData.error) {
+                detailsEl.innerHTML += `<div class="task-error">错误: ${taskData.error}</div>`;
+            }
+        }
+        
+        // 关闭任务面板
+        function closeTaskPanel(taskId) {
+            const panel = document.getElementById('taskPanel');
+            if (panel) {
+                panel.style.display = 'none';
+            }
+            
+            // 停止轮询
+            if (activeTasks.has(taskId)) {
+                clearInterval(activeTasks.get(taskId).interval);
+                activeTasks.delete(taskId);
+            }
+        }
+        
+        // 失败列表相关变量
+        let failuresInterval = null;
+        
+        async function loadFailures() {
+            try {
+                const siteFilter = document.getElementById('failureSiteFilter')?.value || '';
+                const url = siteFilter ? `/api/failures?site=${encodeURIComponent(siteFilter)}` : '/api/failures';
+                
+                const response = await fetch(url);
+                const result = await response.json();
+                
+                if (result.success) {
+                    renderFailures(result.data.failures);
+                    renderFailureStats(result.data.stats);
+                    updateFailureSiteFilter(result.data.stats.by_site);
+                } else {
+                    showError('加载失败列表失败: ' + result.error);
+                }
+            } catch (error) {
+                showError('加载失败列表失败: ' + error.message);
+            }
+        }
+        
+        // 渲染失败列表
+        function renderFailures(failures) {
+            const container = document.getElementById('failuresList');
+            
+            if (failures.length === 0) {
+                container.innerHTML = '<div class="loading" style="color: #999;">🎉 没有失败记录，所有文章爬取正常！</div>';
+                return;
+            }
+            
+            let html = '';
+            failures.forEach(failure => {
+                const siteName = siteConfig[failure.site]?.name || failure.site || '未知平台';
+                const errorMsg = failure.last_error || '未知错误';
+                const crawlTime = failure.last_crawl_time || '未知时间';
+                
+                html += `
+                    <div class="failure-item">
+                        <div class="failure-header">
+                            <div class="failure-info">
+                                <div class="failure-title">
+                                    <a href="${failure.url}" target="_blank">${escapeHtml(failure.title || failure.url)}</a>
+                                </div>
+                                <div class="failure-meta">
+                                    <span>平台: ${siteName}</span>
+                                    <span>失败时间: ${crawlTime}</span>
+                                </div>
+                            </div>
+                            <div class="failure-actions">
+                                <button class="btn-small" onclick="retryFailure(${failure.id})">🔄 重试</button>
+                                <button class="btn-small secondary" onclick="deleteArticle(${failure.id})">删除</button>
+                            </div>
+                        </div>
+                        <div class="failure-error">
+                            <strong>错误信息:</strong> ${escapeHtml(errorMsg)}
+                        </div>
+                    </div>
+                `;
+            });
+            
+            container.innerHTML = html;
+        }
+        
+        // 渲染失败统计
+        function renderFailureStats(stats) {
+            document.getElementById('totalFailures').textContent = stats.total || 0;
+            document.getElementById('recentFailures').textContent = stats.recent_24h || 0;
+        }
+        
+        // 更新平台筛选下拉框
+        function updateFailureSiteFilter(bySite) {
+            const select = document.getElementById('failureSiteFilter');
+            if (!select) return;
+            
+            // 保存当前选择
+            const currentValue = select.value;
+            
+            // 清空选项（保留"所有平台"）
+            select.innerHTML = '<option value="">所有平台</option>';
+            
+            // 添加平台选项
+            Object.keys(bySite || {}).forEach(site => {
+                const siteName = siteConfig[site]?.name || site;
+                const option = document.createElement('option');
+                option.value = site;
+                option.textContent = `${siteName} (${bySite[site]})`;
+                select.appendChild(option);
+            });
+            
+            // 恢复选择
+            if (currentValue) {
+                select.value = currentValue;
+            }
+        }
+        
+        // 重试单个失败
+        async function retryFailure(articleId) {
+            try {
+                const response = await fetch(`/api/failures/retry/${articleId}`, {
+                    method: 'POST'
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showSuccess('已加入爬取队列，请稍后查看结果');
+                    // 延迟刷新列表
+                    setTimeout(() => {
+                        loadFailures();
+                    }, 2000);
+                } else {
+                    showError('重试失败: ' + result.error);
+                }
+            } catch (error) {
+                showError('重试失败: ' + error.message);
+            }
+        }
+        
+        // 重试所有失败
+        async function retryAllFailures() {
+            if (!confirm('确定要重试所有失败的文章吗？这可能会花费较长时间。')) {
+                return;
+            }
+            
+            try {
+                // 触发手动爬取（会爬取所有文章，包括失败的）
+                const response = await fetch('/api/crawl', {
+                    method: 'POST'
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showSuccess('已加入爬取队列，请稍后查看结果');
+                } else {
+                    showError('启动爬取失败: ' + result.error);
+                }
+            } catch (error) {
+                showError('启动爬取失败: ' + error.message);
             }
         }
         

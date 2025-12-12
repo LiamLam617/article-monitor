@@ -7,15 +7,19 @@ import asyncio
 import csv
 import io
 from datetime import datetime
+from typing import List
 from .database import (
-    init_db, add_article, get_all_articles, get_read_counts,
-    delete_article, get_latest_read_count, get_setting, set_setting,
-    add_read_count, get_platform_health, get_platform_failures
+    init_db, add_article, get_all_articles, get_all_articles_with_latest_count,
+    get_read_counts, delete_article, get_latest_read_count, get_setting, set_setting,
+    add_read_count, get_platform_health, get_platform_failures, get_all_failures,
+    get_failure_stats, add_articles_batch, add_read_counts_batch
 )
-from .extractors import extract_read_count
+import logging
+
+logger = logging.getLogger(__name__)
 from .scheduler import start_scheduler
 from urllib.parse import urlparse
-from .config import FLASK_HOST, FLASK_PORT, FLASK_DEBUG, SUPPORTED_SITES, CRAWL_INTERVAL_HOURS
+from .config import FLASK_HOST, FLASK_PORT, FLASK_DEBUG, SUPPORTED_SITES, CRAWL_INTERVAL_HOURS, is_platform_allowed
 
 
 def normalize_url(url: str) -> str:
@@ -43,20 +47,13 @@ def favicon():
 
 @app.route('/api/articles', methods=['GET'])
 def get_articles():
-    """获取所有文章"""
-    articles = get_all_articles()
-    
-    # 添加最新阅读数
-    for article in articles:
-        latest = get_latest_read_count(article['id'])
-        article['latest_count'] = latest['count'] if latest else 0
-        article['latest_timestamp'] = latest['timestamp'] if latest else None
-    
+    """获取所有文章（优化：使用批量查询避免N+1问题）"""
+    articles = get_all_articles_with_latest_count()
     return jsonify({'success': True, 'data': articles})
 
 @app.route('/api/articles/batch', methods=['POST'])
 def create_articles_batch():
-    """批量添加文章"""
+    """批量添加文章（优化：使用异步任务队列，立即返回任务ID）"""
     data = request.json
     urls = data.get('urls', [])
     
@@ -69,38 +66,83 @@ def create_articles_batch():
     if not urls:
         return jsonify({'success': False, 'error': '有效URL不能为空'}), 400
         
-    results = []
-    
-    # 导入必要的模块（在函数外部，确保所有内部函数都能访问）
-    from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
-    from .extractors import create_shared_crawler
-    
-    # 异步处理函数
-    async def process_urls():
-        # 使用共享浏览器实例
+    # 如果URL数量较少（<=5），直接处理；否则使用异步任务
+    if len(urls) <= 5:
+        # 小批量：直接处理
         try:
-            crawler = await create_shared_crawler()
+            results = asyncio.run(_process_urls_sync(urls))
+            return jsonify({'success': True, 'results': results})
         except Exception as e:
-            # 降级：如果无法创建共享实例，results中记录错误
-            return [{'url': u, 'success': False, 'error': f'无法启动爬虫: {str(e)}'} for u in urls]
+            return jsonify({'success': False, 'error': str(e)}), 500
+    else:
+        # 大批量：使用异步任务队列
+        from .task_manager import get_task_manager
+        task_manager = get_task_manager()
+        task_id = task_manager.submit_task(_process_urls_async, urls)
+        return jsonify({
+            'success': True,
+            'task_id': task_id,
+            'message': f'已提交 {len(urls)} 个URL，正在后台处理',
+            'status_url': f'/api/tasks/{task_id}'
+        })
 
-        try:
-            tasks = []
-            for url in urls:
-                tasks.append(process_single_url(url, crawler))
-            
-            return await asyncio.gather(*tasks)
-        finally:
-            await crawler.__aexit__(None, None, None)
+async def _process_urls_async(task_id: str, urls: List[str]):
+    """异步处理URL列表（用于任务队列）"""
+    from .task_manager import get_task_manager
+    task_manager = get_task_manager()
+    
+    results = []
+    total = len(urls)
+    
+    # 使用浏览器池
+    from .browser_pool import get_browser_pool
+    browser_pool = get_browser_pool()
+    
+    # 批量处理（每批10个）
+    batch_size = 10
+    for i in range(0, total, batch_size):
+        batch_urls = urls[i:i+batch_size]
+        batch_results = await _process_batch(batch_urls, browser_pool)
+        results.extend(batch_results)
+        
+        # 更新进度
+        task_manager.update_task_progress(task_id, {
+            'processed': len(results),
+            'total': total,
+            'success': sum(1 for r in results if r.get('success')),
+            'failed': sum(1 for r in results if not r.get('success'))
+        })
+    
+    # 保存最终结果到任务
+    task = task_manager.get_task(task_id)
+    if task:
+        task['results'] = results
 
-    async def process_single_url(url, crawler):
+async def _process_urls_sync(urls: List[str]):
+    """同步处理URL列表（用于小批量）"""
+    from .browser_pool import get_browser_pool
+    browser_pool = get_browser_pool()
+    return await _process_batch(urls, browser_pool)
+
+async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
+    """处理一批URL"""
+    from .extractors import extract_article_info
+    from .database import add_articles_batch, add_read_counts_batch
+    
+    results = []
+    articles_to_add = []
+    read_counts_to_add = []
+    
+    # 并发处理URL
+    async def process_single_url(url: str):
         try:
             # 验证URL
             try:
                 parsed = urlparse(url)
                 if not parsed.scheme or not parsed.netloc:
                     return {'url': url, 'success': False, 'error': '无效的URL格式'}
-            except:
+            except (ValueError, AttributeError) as e:
+                logger.debug(f"URL解析失败 {url}: {e}")
                 return {'url': url, 'success': False, 'error': 'URL解析失败'}
             
             # 检测网站类型
@@ -111,78 +153,110 @@ def create_articles_batch():
                     site = site_name
                     break
             
-            # 爬取标题和阅读数
-            title = None
-            count = None
-            
-            # 根据网站类型设置超时时间（FreeBuf 需要更长时间）
-            timeout = 30000  # 默认30秒
-            if site == 'freebuf':
-                timeout = 60000  # FreeBuf 使用60秒
-            
-            crawler_config = CrawlerRunConfig(
-                page_timeout=timeout,
-                remove_overlay_elements=True
-            )
-            
-            try:
-                result = await crawler.arun(url, config=crawler_config)
-                if result.success:
-                    title = result.metadata.get('title', '')
-                    if not title:
-                        # 尝试从HTML提取
-                        import re
-                        match = re.search(r'<title[^>]*>([^<]+)</title>', result.html, re.IGNORECASE)
-                        if match:
-                            title = match.group(1).strip()
-                    
-                    # 清理标题
-                    if title:
-                        suffixes = [' - 掘金', ' - 稀土掘金', ' - CSDN', ' - 博客园', 
-                                   ' - 面包板', ' - SegmentFault', ' - 简书', ' - 与非网']
-                        for suffix in suffixes:
-                            if title.endswith(suffix):
-                                title = title[:-len(suffix)].strip()
-                                break
-                                
-                    # 尝试提取阅读数
-                    count = await extract_read_count(url, crawler)
-            except Exception as e:
-                # 爬取失败不影响添加，只是没有初始数据
-                pass
-                
-            # 添加到数据库
-            try:
-                article_id = add_article(url, title=title, site=site)
-                
-                # 保存初始阅读数
-                initial_count = count if count is not None else 0
-                add_read_count(article_id, initial_count)
-                
+            # 检查平台是否在白名单中
+            if not is_platform_allowed(site):
                 return {
                     'url': url,
-                    'success': True,
-                    'data': {
-                        'id': article_id,
-                        'title': title,
-                        'site': site,
-                        'initial_count': initial_count
-                    }
+                    'success': False,
+                    'error': f'平台 "{site or "未知"}" 不在允许列表中，已跳过'
                 }
+            
+            # 从浏览器池获取实例
+            crawler = await browser_pool.acquire()
+            if not crawler:
+                # 如果池已满，创建独立实例
+                from .extractors import create_shared_crawler
+                crawler = await create_shared_crawler()
+                use_pool = False
+            else:
+                use_pool = True
+            
+            try:
+                # 爬取标题和阅读数
+                info = await extract_article_info(url, crawler)
+                title = info.get('title')
+                count = info.get('read_count')
             except Exception as e:
-                if 'UNIQUE constraint failed' in str(e):
-                    return {'url': url, 'success': False, 'error': '文章已存在'}
-                return {'url': url, 'success': False, 'error': str(e)}
-                
+                logger.debug(f"爬取失败 {url}: {e}")
+                title = None
+                count = None
+            finally:
+                if use_pool:
+                    await browser_pool.release(crawler)
+                else:
+                    await crawler.__aexit__(None, None, None)
+            
+            # 准备批量插入数据
+            articles_to_add.append((url, title, site))
+            read_counts_to_add.append((count if count is not None else 0,))
+            
+            return {
+                'url': url,
+                'success': True,
+                'data': {
+                    'title': title,
+                    'site': site,
+                    'initial_count': count if count is not None else 0
+                }
+            }
         except Exception as e:
             return {'url': url, 'success': False, 'error': str(e)}
-
-    # 运行异步任务
+                
+    # 并发处理（限制并发数）
+    semaphore = asyncio.Semaphore(5)  # 每批最多5个并发
+    
+    async def process_with_semaphore(url):
+        async with semaphore:
+            return await process_single_url(url)
+    
+    tasks = [process_with_semaphore(url) for url in urls]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # 处理异常结果
+    processed_results = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            processed_results.append({'url': urls[i], 'success': False, 'error': str(result)})
+        else:
+            processed_results.append(result)
+    
+    # 批量插入数据库
     try:
-        results = asyncio.run(process_urls())
-        return jsonify({'success': True, 'results': results})
+        article_ids = add_articles_batch(articles_to_add)
+        
+        # 准备阅读数记录（需要article_id）
+        read_count_records = []
+        for i, (article_id, count_data) in enumerate(zip(article_ids, read_counts_to_add)):
+            if article_id:
+                read_count_records.append((article_id, count_data[0]))
+        
+        if read_count_records:
+            add_read_counts_batch(read_count_records)
+        
+        # 更新结果中的article_id
+        article_idx = 0
+        for result in processed_results:
+            if result.get('success') and article_idx < len(article_ids):
+                result['data']['id'] = article_ids[article_idx]
+                article_idx += 1
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        logger.error(f"批量插入数据库失败: {e}")
+        # 回退到逐个插入
+        for result in processed_results:
+            if result.get('success'):
+                try:
+                    article_id = add_article(
+                        result['data'].get('url'),
+                        result['data'].get('title'),
+                        result['data'].get('site')
+                    )
+                    add_read_count(article_id, result['data'].get('initial_count', 0))
+                    result['data']['id'] = article_id
+                except Exception as e2:
+                    result['success'] = False
+                    result['error'] = str(e2)
+    
+    return processed_results
 
 @app.route('/api/articles', methods=['POST'])
 def create_article():
@@ -198,7 +272,8 @@ def create_article():
         parsed = urlparse(url)
         if not parsed.scheme or not parsed.netloc:
             return jsonify({'success': False, 'error': '无效的URL'}), 400
-    except:
+    except (ValueError, AttributeError) as e:
+        logger.debug(f"URL解析失败 {url}: {e}")
         return jsonify({'success': False, 'error': '无效的URL'}), 400
     
     # 检测网站类型
@@ -209,47 +284,30 @@ def create_article():
             site = site_name
             break
     
-    # 立即爬取一次获取标题和阅读数
+    # 检查平台是否在白名单中
+    if not is_platform_allowed(site):
+        return jsonify({
+            'success': False,
+            'error': f'平台 "{site or "未知"}" 不在允许列表中，已跳过'
+        }), 400
+    
+    # 立即爬取一次获取标题和阅读数（使用统一的提取函数）
     title = None
     count = None
     try:
-        from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
-        browser_config = BrowserConfig(headless=True)
-        crawler_config = CrawlerRunConfig(
-            page_timeout=30000,
-            remove_overlay_elements=True
-        )
+        from .extractors import extract_article_info, create_shared_crawler
         
         async def fetch_title_and_count():
-            async with AsyncWebCrawler(config=browser_config) as crawler:
-                result = await crawler.arun(url, config=crawler_config)
-                if result.success:
-                    # 获取标题
-                    title_text = result.metadata.get('title', '')
-                    if not title_text:
-                        # 尝试从HTML提取
-                        import re
-                        match = re.search(r'<title[^>]*>([^<]+)</title>', result.html, re.IGNORECASE)
-                        if match:
-                            title_text = match.group(1).strip()
-                    
-                    # 清理标题：去除常见后缀
-                    if title_text:
-                        suffixes = [' - 掘金', ' - 稀土掘金', ' - CSDN', ' - 博客园', 
-                                   ' - 面包板', ' - SegmentFault', ' - 简书']
-                        for suffix in suffixes:
-                            if title_text.endswith(suffix):
-                                title_text = title_text[:-len(suffix)].strip()
-                                break
-                    
-                    # 获取阅读数
-                    read_count = await extract_read_count(url)
-                    return title_text or None, read_count
-                return None, None
+            crawler = await create_shared_crawler()
+            try:
+                info = await extract_article_info(url, crawler)
+                return info.get('title'), info.get('read_count')
+            finally:
+                await crawler.__aexit__(None, None, None)
         
         title, count = asyncio.run(fetch_title_and_count())
     except Exception as e:
-        print(f"初次爬取失败: {e}")
+        logger.debug(f"初次爬取失败 {url}: {e}")
         count = None
         title = None
     
@@ -287,9 +345,9 @@ def get_history(article_id):
         
         history = get_read_counts(article_id, limit=limit, start_date=start_date, end_date=end_date, group_by_hour=group_by_hour)
         
-        # 获取文章信息
-        articles = get_all_articles()
-        article = next((a for a in articles if a['id'] == article_id), None)
+        # 获取文章信息（优化：直接查询单篇文章，避免获取所有文章）
+        from .database import get_article_by_id
+        article = get_article_by_id(article_id)
         
         if not article:
             return jsonify({'success': False, 'error': '文章不存在'}), 404
@@ -447,6 +505,77 @@ def get_crawl_progress():
         from .crawler import get_crawl_progress
         progress = get_crawl_progress()
         return jsonify({'success': True, 'data': progress})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/tasks/<task_id>', methods=['GET'])
+def get_task_status(task_id):
+    """获取任务状态"""
+    try:
+        from .task_manager import get_task_manager
+        task_manager = get_task_manager()
+        task = task_manager.get_task(task_id)
+        if task:
+            return jsonify({'success': True, 'data': task})
+        else:
+            return jsonify({'success': False, 'error': '任务不存在'}), 404
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/tasks/<task_id>', methods=['DELETE'])
+def cancel_task(task_id):
+    """取消任务"""
+    try:
+        from .task_manager import get_task_manager
+        task_manager = get_task_manager()
+        if task_manager.cancel_task(task_id):
+            return jsonify({'success': True, 'message': '任务已取消'})
+        else:
+            return jsonify({'success': False, 'error': '无法取消任务'}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/failures', methods=['GET'])
+def get_failures():
+    """获取失败列表"""
+    try:
+        limit = request.args.get('limit', 100, type=int)
+        site = request.args.get('site', None)
+        
+        failures = get_all_failures(limit=limit, site=site)
+        stats = get_failure_stats()
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'failures': failures,
+                'stats': stats
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/failures/retry/<int:article_id>', methods=['POST'])
+def retry_failure(article_id):
+    """重试失败的文章"""
+    try:
+        from .crawler import crawl_all_sync
+        from .database import get_article_by_id
+        
+        # 检查文章是否存在
+        article = get_article_by_id(article_id)
+        if not article:
+            return jsonify({'success': False, 'error': '文章不存在'}), 404
+        
+        # 在后台执行爬取
+        import threading
+        thread = threading.Thread(target=lambda: crawl_all_sync())
+        thread.start()
+        
+        return jsonify({
+            'success': True,
+            'message': '已加入爬取队列，请稍后查看结果'
+        })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -676,7 +805,8 @@ def get_system_health():
                 start = time.time()
                 socket.create_connection((host, port), timeout=3)
                 return {'ok': True, 'latency': int((time.time() - start) * 1000)}
-            except:
+            except (socket.error, OSError, TimeoutError) as e:
+                logger.debug(f"网络连接检查失败 {host}:{port}: {e}")
                 return {'ok': False, 'latency': 0}
         
         # 准备检查列表

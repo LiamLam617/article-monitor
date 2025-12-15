@@ -100,7 +100,7 @@ async def crawl_article_with_retry(article: dict, crawler=None, semaphore=None, 
     
     # 检查平台是否在白名单中（双重保险）
     if not is_platform_allowed(site):
-        logger.debug(f"⏭️  跳过非白名单平台文章: {url} (平台: {site})")
+        logger.info(f"⏭️  跳过非白名单平台文章: {url} (平台: {site})")
         return False
     
     # 检查停止信号（线程安全）
@@ -177,7 +177,7 @@ async def _crawl_with_retry(article: dict, crawler=None, max_retries: int = 3, m
             if count is None:
                 # 如果提取失败，判断是否应该重试
                 if attempt < max_retries:
-                    logger.debug(f"⚠️  提取失败，将重试: {url} (尝试 {attempt + 1}/{max_retries + 1})")
+                    logger.info(f"⚠️  提取失败，将重试: {url} (尝试 {attempt + 1}/{max_retries + 1})")
                     continue
                 else:
                     logger.warning(f"❌ 无法提取阅读数: {url} (已重试 {max_retries} 次)")
@@ -268,7 +268,7 @@ async def crawl_all_articles():
             filtered_articles.append(article)
         else:
             skipped_count += 1
-            logger.debug(f"⏭️  跳过非白名单平台: {article.get('url')} (平台: {site})")
+            logger.info(f"⏭️  跳过非白名单平台: {article.get('url')} (平台: {site})")
     
     if skipped_count > 0:
         logger.info(f"⏭️  已跳过 {skipped_count} 篇非白名单平台文章")
@@ -395,7 +395,13 @@ async def crawl_all_articles():
         try:
             await shared_crawler.__aexit__(None, None, None)
         except Exception as e:
-            logger.debug(f"清理共享浏览器实例时出错: {e}")
+            logger.warning(f"清理共享浏览器实例时出错: {e}")
+            # 尝试强制清理
+            try:
+                if hasattr(shared_crawler, 'browser') and shared_crawler.browser:
+                    await shared_crawler.browser.close()
+            except Exception as e2:
+                logger.debug(f"强制清理浏览器实例失败: {e2}")
     
     # 第二轮：集中重试所有失败的文章（复用浏览器实例）
     with _stop_signal_lock:

@@ -1,85 +1,64 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
 # Python
-__pycache__/
+__pycache__
 *.py[cod]
 *$py.class
 *.so
 .Python
-*.egg-info/
-*.egg
-dist/
-build/
-
-# Virtual Environment
-.venv/
+env/
 venv/
 ENV/
-env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# IDEs
+# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-.cursor/
 
-# Testing
+# 文档
+*.md
+!README.md
+docs/
+
+# 测试
+tests/
 .pytest_cache/
 .coverage
 htmlcov/
-*.cover
-.hypothesis/
-tests/
 
-# Database (will be created in container)
-data/*.db
-data/*.sqlite
-data/*.sqlite3
+# 日志和数据（运行时生成）
+logs/*
+!logs/.gitkeep
+data/*
 !data/.gitkeep
 
-# Logs (will be created in container)
-logs/
-*.log
-!logs/.gitkeep
-
-# OS
-.DS_Store
-Thumbs.db
-*.bak
-
-# Temporary files
-.backup/
-*.tmp
-*.temp
-
-# Git
-.git/
-.gitignore
-.gitattributes
-
 # Docker
-Dockerfile
+Dockerfile*
+docker-compose*.yml
 .dockerignore
-docker-compose.yml
 
-# Documentation (optional, can be included)
-docs/
-
-# Scripts (optional, can be included)
-scripts/
-
-# Other
-*.md
-!README.md
-LICENSE
-Makefile
-pyproject.toml
-setup.py
-requirements-dev.txt
-pytest.ini
-
-# Crawl4AI skill docs (not needed in production)
-crawl4ai/
-
-# Test data / HTML samples (not needed in production)
-test_data/
+# 其他
+.DS_Store
+*.log
+.env
+.env.local

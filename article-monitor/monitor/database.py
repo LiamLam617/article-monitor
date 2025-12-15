@@ -3,9 +3,12 @@
 """
 import sqlite3
 import os
+import logging
 from datetime import datetime
 from typing import List, Dict, Optional
 from .config import DATABASE_PATH
+
+logger = logging.getLogger(__name__)
 
 # 确保数据目录存在
 os.makedirs(os.path.dirname(DATABASE_PATH), exist_ok=True)
@@ -299,14 +302,14 @@ def add_read_counts_batch(records: List[tuple]):
             records
         )
         conn.commit()
-        import logging
-        logger = logging.getLogger(__name__)
         logger.debug(f"批量插入 {len(records)} 条阅读数记录")
+    except sqlite3.Error as e:
+        conn.rollback()
+        logger.error(f"批量插入数据库错误: {e}")
+        raise
     except Exception as e:
         conn.rollback()
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"批量插入失败: {e}")
+        logger.error(f"批量插入失败（未知错误）: {e}")
         raise
     finally:
         conn.close()
@@ -342,14 +345,18 @@ def add_articles_batch(articles: List[tuple]) -> List[int]:
                 article_ids.append(row['id'] if row else None)
         
         conn.commit()
-        import logging
-        logger = logging.getLogger(__name__)
         logger.debug(f"批量添加 {len(articles)} 篇文章")
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        logger.warning(f"批量添加文章失败（完整性错误，可能URL重复）: {e}")
+        raise
+    except sqlite3.Error as e:
+        conn.rollback()
+        logger.error(f"批量添加文章数据库错误: {e}")
+        raise
     except Exception as e:
         conn.rollback()
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"批量添加文章失败: {e}")
+        logger.error(f"批量添加文章失败（未知错误）: {e}")
         raise
     finally:
         conn.close()

@@ -29,6 +29,28 @@ def normalize_url(url: str) -> str:
         url = url.replace('/spost/', '/post/')
     return url
 
+def validate_url(url: str) -> bool:
+    """驗證 URL 是否安全有效
+    
+    Args:
+        url: 要驗證的 URL
+        
+    Returns:
+        如果 URL 有效且安全，返回 True；否則返回 False
+    """
+    try:
+        parsed = urlparse(url)
+        # 只允許 http 和 https
+        if parsed.scheme not in ('http', 'https'):
+            return False
+        # 檢查域名是否為空
+        if not parsed.netloc:
+            return False
+        # 基本格式檢查通過
+        return True
+    except (ValueError, AttributeError):
+        return False
+
 app = Flask(__name__)
 CORS(app)
 
@@ -72,7 +94,11 @@ def create_articles_batch():
         try:
             results = asyncio.run(_process_urls_sync(urls))
             return jsonify({'success': True, 'results': results})
+        except ValueError as e:
+            logger.warning(f"批量添加文章參數錯誤: {e}")
+            return jsonify({'success': False, 'error': f'參數錯誤: {str(e)}'}), 400
         except Exception as e:
+            logger.error(f"批量添加文章失敗: {e}", exc_info=True)
             return jsonify({'success': False, 'error': str(e)}), 500
     else:
         # 大批量：使用异步任务队列
@@ -98,8 +124,9 @@ async def _process_urls_async(task_id: str, urls: List[str]):
     from .browser_pool import get_browser_pool
     browser_pool = get_browser_pool()
     
-    # 批量处理（每批10个）
-    batch_size = 10
+    # 批量处理
+    from .config import BATCH_PROCESS_SIZE
+    batch_size = BATCH_PROCESS_SIZE
     for i in range(0, total, batch_size):
         batch_urls = urls[i:i+batch_size]
         batch_results = await _process_batch(batch_urls, browser_pool)
@@ -129,21 +156,20 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
     from .extractors import extract_article_info
     from .database import add_articles_batch, add_read_counts_batch
     
-    results = []
-    articles_to_add = []
-    read_counts_to_add = []
+    processed_results: List[dict] = [None] * len(urls)
     
     # 并发处理URL
-    async def process_single_url(url: str):
+    async def process_single_url(idx: int, url: str):
         try:
             # 验证URL
+            if not validate_url(url):
+                return idx, {'url': url, 'success': False, 'error': '无效的URL格式（只支持 http/https）'}
+            
             try:
                 parsed = urlparse(url)
-                if not parsed.scheme or not parsed.netloc:
-                    return {'url': url, 'success': False, 'error': '无效的URL格式'}
             except (ValueError, AttributeError) as e:
-                logger.debug(f"URL解析失败 {url}: {e}")
-                return {'url': url, 'success': False, 'error': 'URL解析失败'}
+                logger.warning(f"URL解析失败 {url}: {e}")
+                return idx, {'url': url, 'success': False, 'error': 'URL解析失败'}
             
             # 检测网站类型
             domain = parsed.netloc.lower()
@@ -177,7 +203,7 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
                 title = info.get('title')
                 count = info.get('read_count')
             except Exception as e:
-                logger.debug(f"爬取失败 {url}: {e}")
+                logger.warning(f"爬取失败 {url}: {e}")
                 title = None
                 count = None
             finally:
@@ -186,11 +212,7 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
                 else:
                     await crawler.__aexit__(None, None, None)
             
-            # 准备批量插入数据
-            articles_to_add.append((url, title, site))
-            read_counts_to_add.append((count if count is not None else 0,))
-            
-            return {
+            return idx, {
                 'url': url,
                 'success': True,
                 'data': {
@@ -200,47 +222,80 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
                 }
             }
         except Exception as e:
-            return {'url': url, 'success': False, 'error': str(e)}
+            return idx, {'url': url, 'success': False, 'error': str(e)}
                 
     # 并发处理（限制并发数）
-    semaphore = asyncio.Semaphore(5)  # 每批最多5个并发
+    from .config import BATCH_PROCESS_CONCURRENCY
+    semaphore = asyncio.Semaphore(BATCH_PROCESS_CONCURRENCY)
     
-    async def process_with_semaphore(url):
+    async def process_with_semaphore(idx: int, url: str):
         async with semaphore:
-            return await process_single_url(url)
+            return await process_single_url(idx, url)
     
-    tasks = [process_with_semaphore(url) for url in urls]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    tasks = [process_with_semaphore(i, url) for i, url in enumerate(urls)]
+    gathered = await asyncio.gather(*tasks, return_exceptions=True)
     
-    # 处理异常结果
-    processed_results = []
-    for i, result in enumerate(results):
+    # 处理结果，保持输入顺序
+    for i, result in enumerate(gathered):
         if isinstance(result, Exception):
-            processed_results.append({'url': urls[i], 'success': False, 'error': str(result)})
+            processed_results[i] = {'url': urls[i], 'success': False, 'error': str(result)}
         else:
-            processed_results.append(result)
+            idx, payload = result
+            processed_results[idx] = payload
+    
+    # 按顺序收集成功的文章和阅读数
+    articles_to_add = []
+    read_counts_to_add = []
+    for item in processed_results:
+        if item and item.get('success'):
+            articles_to_add.append((item.get('url'), item['data'].get('title'), item['data'].get('site')))
+            read_counts_to_add.append((item['data'].get('initial_count', 0),))
     
     # 批量插入数据库
     try:
         article_ids = add_articles_batch(articles_to_add)
         
+        # 验证返回的 ID 数量与输入一致
+        if len(article_ids) != len(articles_to_add):
+            logger.warning(
+                f"批量插入部分失败: 返回 {len(article_ids)} 个ID, "
+                f"期望 {len(articles_to_add)} 个。回退到逐个插入"
+            )
+            raise ValueError("批量插入不完整")
+        
+        # 检查是否有 None 值（表示插入失败）
+        if None in article_ids:
+            logger.warning("批量插入包含失败项（None值），回退到逐个插入")
+            raise ValueError("批量插入包含失败项")
+        
         # 准备阅读数记录（需要article_id）
+        # 确保索引对应关系正确
+        if len(read_counts_to_add) != len(articles_to_add):
+            logger.warning(
+                f"阅读数记录数量不匹配: read_counts_to_add={len(read_counts_to_add)}, articles_to_add={len(articles_to_add)}"
+            )
+            raise ValueError("阅读数记录数量不匹配")
+
         read_count_records = []
-        for i, (article_id, count_data) in enumerate(zip(article_ids, read_counts_to_add)):
-            if article_id:
-                read_count_records.append((article_id, count_data[0]))
+        for article_id, count_tuple in zip(article_ids, read_counts_to_add):
+            if article_id is not None and count_tuple:
+                read_count_records.append((article_id, count_tuple[0]))
         
         if read_count_records:
             add_read_counts_batch(read_count_records)
         
-        # 更新结果中的article_id
+        # 更新结果中的article_id（确保成功結果與返回ID對齊）
+        success_count = 0
         article_idx = 0
         for result in processed_results:
             if result.get('success') and article_idx < len(article_ids):
                 result['data']['id'] = article_ids[article_idx]
                 article_idx += 1
+                success_count += 1
+        
+        logger.info(f"批量插入成功: {success_count} 篇文章")
     except Exception as e:
-        logger.error(f"批量插入数据库失败: {e}")
+        logger.error(f"批量插入数据库失败: {e}，回退到逐个插入")
         # 回退到逐个插入
         for result in processed_results:
             if result.get('success'):
@@ -253,6 +308,7 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
                     add_read_count(article_id, result['data'].get('initial_count', 0))
                     result['data']['id'] = article_id
                 except Exception as e2:
+                    logger.error(f"逐个插入失败 {result['data'].get('url')}: {e2}")
                     result['success'] = False
                     result['error'] = str(e2)
     
@@ -268,12 +324,13 @@ def create_article():
         return jsonify({'success': False, 'error': 'URL不能为空'}), 400
     
     # 验证URL
+    if not validate_url(url):
+        return jsonify({'success': False, 'error': '无效的URL格式（只支持 http/https）'}), 400
+    
     try:
         parsed = urlparse(url)
-        if not parsed.scheme or not parsed.netloc:
-            return jsonify({'success': False, 'error': '无效的URL'}), 400
     except (ValueError, AttributeError) as e:
-        logger.debug(f"URL解析失败 {url}: {e}")
+        logger.warning(f"URL解析失败 {url}: {e}")
         return jsonify({'success': False, 'error': '无效的URL'}), 400
     
     # 检测网站类型
@@ -307,7 +364,7 @@ def create_article():
         
         title, count = asyncio.run(fetch_title_and_count())
     except Exception as e:
-        logger.debug(f"初次爬取失败 {url}: {e}")
+        logger.warning(f"初次爬取失败 {url}: {e}")
         count = None
         title = None
     
@@ -322,7 +379,11 @@ def create_article():
             'success': True,
             'data': {'id': article_id, 'url': url, 'title': title, 'site': site, 'initial_count': initial_count}
         })
+    except ValueError as e:
+        logger.warning(f"添加文章參數錯誤: {e}")
+        return jsonify({'success': False, 'error': f'參數錯誤: {str(e)}'}), 400
     except Exception as e:
+        logger.error(f"添加文章失敗: {e}", exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/articles/<int:article_id>', methods=['DELETE'])
@@ -331,7 +392,11 @@ def remove_article(article_id):
     try:
         delete_article(article_id)
         return jsonify({'success': True})
+    except ValueError as e:
+        logger.warning(f"刪除文章參數錯誤: {e}")
+        return jsonify({'success': False, 'error': f'參數錯誤: {str(e)}'}), 400
     except Exception as e:
+        logger.error(f"刪除文章失敗: {e}", exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/articles/<int:article_id>/history', methods=['GET'])
@@ -601,10 +666,13 @@ def export_csv():
         # 写入表头
         writer.writerow(['文章标题', '网站', 'URL', '阅读数', '记录时间'])
         
+        # 优化：一次性获取所有文章，避免重复查询
+        all_articles = get_all_articles()
+        articles_dict = {a['id']: a for a in all_articles}
+        
         # 获取每篇文章的数据
         for article_id in article_ids:
-            articles = get_all_articles()
-            article = next((a for a in articles if a['id'] == article_id), None)
+            article = articles_dict.get(article_id)
             
             if not article:
                 continue
@@ -777,7 +845,12 @@ def get_system_health():
                     elif diff_hours > crawl_interval * 2:
                         status = 'warning'
                         msg = f'延迟 ({int(diff_hours)}小时)'
-                except:
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"解析時間格式失敗: {e}")
+                    status = 'unknown'
+                    msg = '时间格式错误'
+                except Exception as e:
+                    logger.warning(f"處理平台狀態時發生未知錯誤: {e}")
                     status = 'unknown'
                     msg = '时间格式错误'
             
@@ -800,13 +873,14 @@ def get_system_health():
         # 3. 网络连通性 (并发检查)
         import concurrent.futures
         
+        from .config import HEALTH_CHECK_TIMEOUT, MAX_HEALTH_CHECK_WORKERS
         def check_conn(host, port=443):
             try:
                 start = time.time()
-                socket.create_connection((host, port), timeout=3)
+                socket.create_connection((host, port), timeout=HEALTH_CHECK_TIMEOUT)
                 return {'ok': True, 'latency': int((time.time() - start) * 1000)}
             except (socket.error, OSError, TimeoutError) as e:
-                logger.debug(f"网络连接检查失败 {host}:{port}: {e}")
+                logger.debug(f"网络连接检查失败 {host}:{port}: {e}")  # 網絡檢查失敗是正常的，使用 debug
                 return {'ok': False, 'latency': 0}
         
         # 准备检查列表
@@ -817,7 +891,7 @@ def get_system_health():
         network_results = {}
         
         # 使用线程池并发检查，避免阻塞
-        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_HEALTH_CHECK_WORKERS) as executor:
             future_to_target = {
                 executor.submit(check_conn, domain, 443): (name, domain) 
                 for name, domain in targets
@@ -832,7 +906,8 @@ def get_system_health():
                         'host': domain,
                         'status': result
                     }
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"網絡檢查異常 {domain}: {e}")
                     network_results[domain] = {
                         'name': name,
                         'host': domain,

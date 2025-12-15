@@ -47,8 +47,8 @@ ANTI_SCRAPING_UA_ROTATION_MAX = int(os.getenv('ANTI_SCRAPING_UA_ROTATION_MAX', '
 
 # Flask配置（支持环境变量）
 FLASK_HOST = os.getenv('FLASK_HOST', '127.0.0.1')
-FLASK_PORT = int(os.getenv('FLASK_PORT', '5001'))
-FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'True').lower() in ('true', '1', 'yes')
+FLASK_PORT = int(os.getenv('FLASK_PORT', '5000'))
+FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'False').lower() in ('true', '1', 'yes')
 
 # 支持的网站
 SUPPORTED_SITES = {
@@ -195,3 +195,19 @@ PLATFORM_EXTRACTORS = {
         'parse_method': 'number_with_suffix'
     }
 }
+
+# ==================== 應用常量 ====================
+# CSV 導出相關
+CSV_EXPORT_BATCH_SIZE = 100  # CSV 導出批次大小
+
+# 任務管理器相關
+TASK_QUEUE_TIMEOUT = 5.0  # 任務隊列超時時間（秒）
+MAX_CONCURRENT_TASKS = 3  # 最大並發任務數
+
+# 批量處理相關
+BATCH_PROCESS_SIZE = 10  # 批量處理 URL 的批次大小
+BATCH_PROCESS_CONCURRENCY = 5  # 批量處理的並發數
+
+# 健康檢查相關
+HEALTH_CHECK_TIMEOUT = 3  # 健康檢查超時時間（秒）
+MAX_HEALTH_CHECK_WORKERS = 20  # 健康檢查最大工作線程數

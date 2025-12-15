@@ -197,7 +197,7 @@ async def _crawl_with_shared(url: str, crawler: AsyncWebCrawler, crawler_config:
             return None
         return result
     except Exception as e:
-        logger.debug(f"爬取失败 {url}: {e}")
+        logger.warning(f"爬取失败 {url}: {e}")
         return None
 
 @lru_cache(maxsize=None)  # 无界缓存，因为模式数量有限且固定

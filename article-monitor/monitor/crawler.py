@@ -4,8 +4,10 @@
 import asyncio
 import threading
 import logging
+import random
 from datetime import datetime
 from typing import List, Dict, Optional
+from enum import Enum
 from .database import (
     get_all_articles, add_read_count, get_latest_read_count,
     get_latest_read_counts_batch, update_article_title, update_article_status
@@ -15,6 +17,8 @@ from urllib.parse import urlparse
 from .config import (
     SUPPORTED_SITES, CRAWL_CONCURRENCY, CRAWL_DELAY, 
     CRAWL_MAX_RETRIES, CRAWL_RETRY_DELAY, CRAWL_RETRY_BACKOFF,
+    CRAWL_RETRY_MAX_DELAY, CRAWL_RETRY_JITTER,
+    CRAWL_RETRY_NETWORK_MAX, CRAWL_RETRY_PARSE_MAX, CRAWL_RETRY_SSL_MAX, CRAWL_RETRY_SSL_DELAY,
     ANTI_SCRAPING_ENABLED, ANTI_SCRAPING_RANDOM_DELAY,
     ANTI_SCRAPING_MIN_DELAY, ANTI_SCRAPING_MAX_DELAY,
     is_platform_allowed
@@ -70,16 +74,67 @@ def reset_crawl_progress():
             'end_time': None
         }
 
-def _is_retryable_error(error: Exception) -> bool:
-    """判断错误是否可重试"""
+class ErrorCategory(Enum):
+    """错误分类枚举"""
+    NETWORK = 'network'  # 网络错误（可重试）
+    PARSE = 'parse'  # 解析错误（可重试，但重试次数较少）
+    SSL = 'ssl'  # SSL/证书错误（可重试，需要更长延迟）
+    PERMANENT = 'permanent'  # 永久性错误（不重试）
+    UNKNOWN = 'unknown'  # 未知错误（默认可重试）
+
+# 重试优先级映射（数字越小优先级越高）
+RETRY_PRIORITY_MAP = {
+    ErrorCategory.NETWORK: 1,
+    ErrorCategory.UNKNOWN: 1,
+    ErrorCategory.PARSE: 2,
+    ErrorCategory.SSL: 3,
+    ErrorCategory.PERMANENT: 4
+}
+
+def _get_error_category(error: Exception) -> ErrorCategory:
+    """智能错误分类
+    
+    Args:
+        error: 异常对象
+        
+    Returns:
+        ErrorCategory: 错误分类
+    """
     error_str = str(error).lower()
-    retryable_keywords = [
+    
+    # 永久性错误（不重试）
+    permanent_keywords = ['404', 'not found', '403', 'forbidden', '401', 'unauthorized']
+    if any(keyword in error_str for keyword in permanent_keywords):
+        return ErrorCategory.PERMANENT
+    
+    # SSL/证书错误
+    ssl_keywords = ['ssl', 'certificate', 'handshake', 'tls', 'cert']
+    if any(keyword in error_str for keyword in ssl_keywords):
+        return ErrorCategory.SSL
+    
+    # 网络错误（可重试）
+    network_keywords = [
         'timeout', 'connection', 'network', 'temporary',
         '503', '502', '504', '429',  # HTTP错误码
         'econnrefused', 'econnreset', 'etimedout',
-        'ssl', 'certificate', 'handshake'
+        'connection refused', 'connection reset', 'connection aborted',
+        'name resolution', 'dns', 'no route to host'
     ]
-    return any(keyword in error_str for keyword in retryable_keywords)
+    if any(keyword in error_str for keyword in network_keywords):
+        return ErrorCategory.NETWORK
+    
+    # 解析错误（提取失败、页面结构变化）
+    parse_keywords = ['extract', 'parse', 'selector', 'element not found', 'no such element']
+    if any(keyword in error_str for keyword in parse_keywords):
+        return ErrorCategory.PARSE
+    
+    # 默认：未知错误，视为网络错误（可重试）
+    return ErrorCategory.UNKNOWN
+
+def _is_retryable_error(error: Exception) -> bool:
+    """判断错误是否可重试（保持向后兼容）"""
+    category = _get_error_category(error)
+    return category != ErrorCategory.PERMANENT
 
 async def crawl_article_with_retry(article: dict, crawler=None, semaphore=None, max_retries: int = None, skip_retry: bool = False) -> bool:
     """爬取单篇文章（带重试机制）
@@ -126,6 +181,54 @@ async def crawl_article_with_retry(article: dict, crawler=None, semaphore=None, 
     else:
         return await _do_crawl()
 
+def _calculate_retry_delay(error_category: ErrorCategory, attempt: int) -> float:
+    """计算重试延迟（根据错误类型和尝试次数）
+    
+    Args:
+        error_category: 错误分类
+        attempt: 当前尝试次数（从1开始）
+        
+    Returns:
+        float: 延迟时间（秒）
+    """
+    if error_category == ErrorCategory.SSL:
+        # SSL错误：固定长延迟
+        base_delay = CRAWL_RETRY_SSL_DELAY
+    elif error_category == ErrorCategory.PARSE:
+        # 解析错误：线性退避
+        base_delay = CRAWL_RETRY_DELAY * attempt
+    else:
+        # 网络错误和未知错误：指数退避
+        base_delay = CRAWL_RETRY_DELAY * (CRAWL_RETRY_BACKOFF ** (attempt - 1))
+    
+    # 应用最大延迟上限
+    delay = min(base_delay, CRAWL_RETRY_MAX_DELAY)
+    
+    # 添加抖动（jitter）避免雷群效应
+    if CRAWL_RETRY_JITTER:
+        jitter = random.uniform(-0.1 * delay, 0.1 * delay)
+        delay = max(0.1, delay + jitter)  # 确保延迟不为负
+    
+    return delay
+
+def _get_max_retries_for_category(error_category: ErrorCategory) -> int:
+    """根据错误类型获取最大重试次数
+    
+    Args:
+        error_category: 错误分类
+        
+    Returns:
+        int: 最大重试次数
+    """
+    if error_category == ErrorCategory.NETWORK or error_category == ErrorCategory.UNKNOWN:
+        return CRAWL_RETRY_NETWORK_MAX
+    elif error_category == ErrorCategory.PARSE:
+        return CRAWL_RETRY_PARSE_MAX
+    elif error_category == ErrorCategory.SSL:
+        return CRAWL_RETRY_SSL_MAX
+    else:  # PERMANENT
+        return 0
+
 async def _crawl_with_retry(article: dict, crawler=None, max_retries: int = 3, mark_error_on_fail: bool = True) -> bool:
     """带重试机制的爬取逻辑（同时更新标题）
     
@@ -140,14 +243,15 @@ async def _crawl_with_retry(article: dict, crawler=None, max_retries: int = 3, m
     current_title = article.get('title', '')
     
     last_error = None
+    last_error_category = None
     
     for attempt in range(max_retries + 1):  # 0到max_retries，共max_retries+1次尝试
         try:
             # 如果不是第一次尝试，等待后重试
-            if attempt > 0:
-                # 指数退避：延迟时间 = 基础延迟 * (退避倍数 ^ 尝试次数)
-                delay = CRAWL_RETRY_DELAY * (CRAWL_RETRY_BACKOFF ** (attempt - 1))
-                logger.info(f"🔄 重试 {attempt}/{max_retries}: {url} (等待 {delay:.1f}秒)")
+            if attempt > 0 and last_error_category:
+                # 根据错误类型计算延迟
+                delay = _calculate_retry_delay(last_error_category, attempt)
+                logger.info(f"🔄 重试 {attempt}/{max_retries}: {url} (错误类型: {last_error_category.value}, 等待 {delay:.1f}秒)")
                 await asyncio.sleep(delay)
                 
                 # 再次检查停止信号（在睡眠期间可能收到了停止信号）
@@ -175,12 +279,18 @@ async def _crawl_with_retry(article: dict, crawler=None, max_retries: int = 3, m
                     logger.info(f"📝 更新标题: {new_title[:30]}...")
             
             if count is None:
-                # 如果提取失败，判断是否应该重试
-                if attempt < max_retries:
-                    logger.info(f"⚠️  提取失败，将重试: {url} (尝试 {attempt + 1}/{max_retries + 1})")
+                # 提取失败视为解析错误
+                parse_error = Exception('无法提取阅读数')
+                last_error_category = ErrorCategory.PARSE
+                category_max_retries = _get_max_retries_for_category(last_error_category)
+                effective_max_retries = min(max_retries, category_max_retries)
+                
+                if attempt < effective_max_retries:
+                    logger.info(f"⚠️  提取失败（解析错误），将重试: {url} (尝试 {attempt + 1}/{effective_max_retries + 1})")
+                    last_error = parse_error
                     continue
                 else:
-                    logger.warning(f"❌ 无法提取阅读数: {url} (已重试 {max_retries} 次)")
+                    logger.warning(f"❌ 无法提取阅读数: {url} (已重试 {effective_max_retries} 次)")
                     # 提取失败时不标记ERROR（等待集中重试）
                     if mark_error_on_fail:
                         update_article_status(article_id, 'ERROR', '无法提取阅读数')
@@ -214,25 +324,42 @@ async def _crawl_with_retry(article: dict, crawler=None, max_retries: int = 3, m
             
         except Exception as e:
             last_error = e
+            last_error_category = _get_error_category(e)
             error_str = str(e).lower()
+            
+            # 快速失败：永久性错误立即失败，不重试
+            if last_error_category == ErrorCategory.PERMANENT:
+                error_msg = str(e)[:100]
+                logger.error(f"❌ 永久性错误（不重试）{url}: {error_msg}")
+                if mark_error_on_fail:
+                    update_article_status(article_id, 'ERROR', error_msg)
+                return False
+            
+            # 根据错误类型获取最大重试次数
+            category_max_retries = _get_max_retries_for_category(last_error_category)
+            effective_max_retries = min(max_retries, category_max_retries)
             
             # 判断是否可重试
             is_retryable = _is_retryable_error(e)
             
-            if is_retryable and attempt < max_retries:
-                logger.warning(f"⚠️  可重试错误 (尝试 {attempt + 1}/{max_retries + 1}): {url} - {str(e)[:100]}")
+            if is_retryable and attempt < effective_max_retries:
+                logger.warning(f"⚠️  可重试错误 [{last_error_category.value}] (尝试 {attempt + 1}/{effective_max_retries + 1}): {url} - {str(e)[:100]}")
                 continue
             else:
                 # 不可重试或已达到最大重试次数
                 error_msg = str(e)[:100]
-                if 'timeout' in error_str or 'connection' in error_str:
+                if last_error_category == ErrorCategory.NETWORK:
                     logger.error(f"⏱️  网络错误 {url}: {error_msg} (已重试 {attempt} 次)")
+                elif last_error_category == ErrorCategory.PARSE:
+                    logger.error(f"🔍 解析错误 {url}: {error_msg} (已重试 {attempt} 次)")
+                elif last_error_category == ErrorCategory.SSL:
+                    logger.error(f"🔒 SSL错误 {url}: {error_msg} (已重试 {attempt} 次)")
                 else:
                     logger.error(f"❌ 爬取失败 {url}: {error_msg} (已重试 {attempt} 次)")
                 
                 # 更新状态为失败（根据参数决定是否标记）
                 # 第一轮不标记ERROR（等待集中重试），第二轮才标记
-                if mark_error_on_fail and (not is_retryable or attempt >= max_retries):
+                if mark_error_on_fail and (not is_retryable or attempt >= effective_max_retries):
                     update_article_status(article_id, 'ERROR', str(e))
                 
                 return False
@@ -404,6 +531,24 @@ async def crawl_all_articles():
                 logger.debug(f"强制清理浏览器实例失败: {e2}")
     
     # 第二轮：集中重试所有失败的文章（复用浏览器实例）
+    # 优化：按错误类型排序，优先重试成功率高的错误
+    def _get_retry_priority(article: dict) -> int:
+        """获取重试优先级（数字越小优先级越高）"""
+        last_error = article.get('last_error', '')
+        if not last_error:
+            return 2  # 未知错误，中等优先级
+        
+        # 创建临时异常对象用于分类
+        try:
+            temp_error = Exception(last_error)
+            category = _get_error_category(temp_error)
+            return RETRY_PRIORITY_MAP.get(category, 2)
+        except Exception:
+            return 2
+    
+    # 按优先级排序失败文章
+    failed_articles.sort(key=_get_retry_priority)
+    
     with _stop_signal_lock:
         should_retry = not _stop_signal and len(failed_articles) > 0
     

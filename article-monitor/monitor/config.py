@@ -20,9 +20,17 @@ CRAWL_CONCURRENCY = min(int(os.getenv('CRAWL_CONCURRENCY', '5')), 10)
 CRAWL_DELAY = float(os.getenv('CRAWL_DELAY', '1'))
 
 # 重试配置
-CRAWL_MAX_RETRIES = int(os.getenv('CRAWL_MAX_RETRIES', '10'))  # 最大重试次数
+CRAWL_MAX_RETRIES = int(os.getenv('CRAWL_MAX_RETRIES', '10'))  # 最大重试次数（网络错误）
 CRAWL_RETRY_DELAY = float(os.getenv('CRAWL_RETRY_DELAY', '2'))  # 重试延迟（秒）
 CRAWL_RETRY_BACKOFF = float(os.getenv('CRAWL_RETRY_BACKOFF', '1.5'))  # 重试退避倍数
+CRAWL_RETRY_MAX_DELAY = float(os.getenv('CRAWL_RETRY_MAX_DELAY', '30'))  # 最大重试延迟（秒）
+CRAWL_RETRY_JITTER = os.getenv('CRAWL_RETRY_JITTER', 'True').lower() in ('true', '1', 'yes')  # 是否启用抖动
+
+# 不同错误类型的重试配置
+CRAWL_RETRY_NETWORK_MAX = int(os.getenv('CRAWL_RETRY_NETWORK_MAX', '10'))  # 网络错误最大重试次数
+CRAWL_RETRY_PARSE_MAX = int(os.getenv('CRAWL_RETRY_PARSE_MAX', '3'))  # 解析错误最大重试次数
+CRAWL_RETRY_SSL_MAX = int(os.getenv('CRAWL_RETRY_SSL_MAX', '5'))  # SSL错误最大重试次数
+CRAWL_RETRY_SSL_DELAY = float(os.getenv('CRAWL_RETRY_SSL_DELAY', '5'))  # SSL错误固定延迟（秒）
 
 # ==================== 防反爬配置 ====================
 # 是否启用防反爬功能
@@ -72,7 +80,7 @@ if ALLOWED_PLATFORMS_ENV:
     ALLOWED_PLATFORMS = [p.strip() for p in ALLOWED_PLATFORMS_ENV.split(',') if p.strip()]
 else:
     # 默认白名单：只允许常用平台
-    ALLOWED_PLATFORMS = ['juejin', 'csdn', 'cnblog', '51cto', 'segmentfault', 'jinshu', 'MBB', 'eefocus', 'sohu']
+    ALLOWED_PLATFORMS = ['juejin', 'csdn', 'cnblog', '51cto', 'segmentfault', 'jinshu', 'MBB', 'elecfans', 'sohu']
 
 def is_platform_allowed(site: str) -> bool:
     """检查平台是否在白名单中

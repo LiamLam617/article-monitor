@@ -101,9 +101,15 @@ class BrowserPool:
         
         优化：确保每个浏览器实例使用一致的配置
         对于防反爬模式，每次创建时获取新配置（支持轮换）
+        对于非防反爬模式，复用缓存的配置以提升性能
         """
-        # 获取浏览器配置（防反爬模式下每次获取新配置以支持轮换）
-        browser_config = get_browser_config()
+        # 根据防反爬状态选择配置获取方式
+        # 防反爬模式：每次获取新配置以支持轮换
+        # 非防反爬模式：复用缓存的配置以提升性能
+        if ANTI_SCRAPING_ENABLED:
+            browser_config = get_browser_config()
+        else:
+            browser_config = ensure_browser_config()
         
         crawler = AsyncWebCrawler(config=browser_config)
         await crawler.__aenter__()

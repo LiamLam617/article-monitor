@@ -45,7 +45,11 @@ class TaskManager:
         self._task_queue = asyncio.Queue()
         self._worker_thread = None
         self._event_loop = None  # 保存工作線程的事件循環引用
+        self._loop_ready = threading.Event()  # 事件循環就緒標誌
         self._start_worker()
+        # 等待事件循環啟動並就緒
+        if not self._loop_ready.wait(timeout=5.0):
+            raise RuntimeError("任務管理器事件循環啟動超時")
     
     def _start_worker(self):
         """启动后台工作线程"""
@@ -60,11 +64,13 @@ class TaskManager:
         asyncio.set_event_loop(loop)
         with self._task_lock:
             self._event_loop = loop  # 保存循環引用供其他線程使用
+        self._loop_ready.set()  # 標記事件循環已就緒
         try:
             loop.run_until_complete(self._process_tasks())
         finally:
             with self._task_lock:
                 self._event_loop = None
+                self._loop_ready.clear()
     
     async def _process_tasks(self):
         """处理任务队列"""
@@ -138,44 +144,20 @@ class TaskManager:
             self._tasks[task_id] = task
         
         # 添加到队列（使用线程安全的方式）
-        # 使用 run_coroutine_threadsafe 來線程安全地添加任務
         with self._task_lock:
             loop_ref = self._event_loop
 
-        if loop_ref and loop_ref.is_running():
-            # 工作線程的循環正在運行，使用線程安全的方式添加
-            try:
-                future = asyncio.run_coroutine_threadsafe(
-                    self._task_queue.put(task_id),
-                    loop_ref
-                )
-                # 不等待結果，避免阻塞
-            except Exception as e:
-                logger.error(f"添加任務到隊列失敗: {e}")
-        else:
-            # 工作線程尚未啟動或循環未運行，使用後備方案
-            def add_to_queue():
-                try:
-                    # 等待工作線程啟動
-                    import time
-                    for _ in range(10):  # 最多等待 1 秒
-                        if self._event_loop and self._event_loop.is_running():
-                            try:
-                                asyncio.run_coroutine_threadsafe(
-                                    self._task_queue.put(task_id),
-                                    self._event_loop
-                                )
-                                return
-                            except Exception as e:
-                                logger.error(f"添加任務到隊列失敗: {e}")
-                                return
-                        time.sleep(0.1)
-                    # 如果仍然無法添加，記錄錯誤
-                    logger.warning(f"無法添加任務到隊列，工作線程可能未啟動: {task_id}")
-                except Exception as e:
-                    logger.error(f"添加任務到隊列失敗: {e}")
-            
-            threading.Thread(target=add_to_queue, daemon=True).start()
+        if not loop_ref or not loop_ref.is_running():
+            raise RuntimeError("事件循環未就緒，無法提交任務")
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._task_queue.put(task_id),
+                loop_ref
+            )
+        except Exception as e:
+            logger.error(f"添加任務到隊列失敗: {e}")
+            raise RuntimeError(f"無法添加任務到隊列: {e}")
         
         logger.info(f"任务已提交: {task_id}")
         return task_id

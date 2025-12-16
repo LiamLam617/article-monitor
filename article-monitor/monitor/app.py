@@ -7,7 +7,7 @@ import asyncio
 import csv
 import io
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 from .database import (
     init_db, add_article, get_all_articles, get_all_articles_with_latest_count,
     get_read_counts, delete_article, get_latest_read_count, get_setting, set_setting,
@@ -50,6 +50,39 @@ def validate_url(url: str) -> bool:
         return True
     except (ValueError, AttributeError):
         return False
+
+def validate_and_normalize_url(url: str) -> tuple[bool, str, Optional[str]]:
+    """驗證並規範化 URL，檢測平台
+    
+    Args:
+        url: 原始 URL
+        
+    Returns:
+        (is_valid, normalized_url, site) 元組
+        - is_valid: URL 是否有效
+        - normalized_url: 規範化後的 URL
+        - site: 平台名稱（如果檢測到），否則為 None
+    """
+    url = normalize_url(url.strip())
+    
+    if not url:
+        return False, url, None
+    
+    if not validate_url(url):
+        return False, url, None
+    
+    try:
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        site = None
+        for site_domain, site_name in SUPPORTED_SITES.items():
+            if site_domain in domain:
+                site = site_name
+                break
+        return True, url, site
+    except (ValueError, AttributeError) as e:
+        logger.debug(f"URL解析失败 {url}: {e}")
+        return False, url, None
 
 app = Flask(__name__)
 CORS(app)
@@ -160,29 +193,17 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
     
     # 并发处理URL
     async def process_single_url(idx: int, url: str):
+        normalized_url = url  # 初始化為原始 URL，作為異常情況的備用
         try:
-            # 验证URL
-            if not validate_url(url):
+            # 验证并规范化URL，检测平台
+            is_valid, normalized_url, site = validate_and_normalize_url(url)
+            if not is_valid:
                 return idx, {'url': url, 'success': False, 'error': '无效的URL格式（只支持 http/https）'}
-            
-            try:
-                parsed = urlparse(url)
-            except (ValueError, AttributeError) as e:
-                logger.warning(f"URL解析失败 {url}: {e}")
-                return idx, {'url': url, 'success': False, 'error': 'URL解析失败'}
-            
-            # 检测网站类型
-            domain = parsed.netloc.lower()
-            site = None
-            for site_domain, site_name in SUPPORTED_SITES.items():
-                if site_domain in domain:
-                    site = site_name
-                    break
             
             # 检查平台是否在白名单中
             if not is_platform_allowed(site):
-                return {
-                    'url': url,
+                return idx, {
+                    'url': normalized_url,
                     'success': False,
                     'error': f'平台 "{site or "未知"}" 不在允许列表中，已跳过'
                 }
@@ -199,7 +220,7 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
             
             try:
                 # 爬取标题和阅读数
-                info = await extract_article_info(url, crawler)
+                info = await extract_article_info(normalized_url, crawler)
                 title = info.get('title')
                 count = info.get('read_count')
             except Exception as e:
@@ -213,7 +234,7 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
                     await crawler.__aexit__(None, None, None)
             
             return idx, {
-                'url': url,
+                'url': normalized_url,
                 'success': True,
                 'data': {
                     'title': title,
@@ -222,7 +243,8 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
                 }
             }
         except Exception as e:
-            return idx, {'url': url, 'success': False, 'error': str(e)}
+            # normalized_url 總是在 try 塊開始時定義
+            return idx, {'url': normalized_url, 'success': False, 'error': str(e)}
                 
     # 并发处理（限制并发数）
     from .config import BATCH_PROCESS_CONCURRENCY
@@ -252,65 +274,45 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
             read_counts_to_add.append((item['data'].get('initial_count', 0),))
     
     # 批量插入数据库
-    try:
-        article_ids = add_articles_batch(articles_to_add)
-        
-        # 验证返回的 ID 数量与输入一致
-        if len(article_ids) != len(articles_to_add):
-            logger.warning(
-                f"批量插入部分失败: 返回 {len(article_ids)} 个ID, "
-                f"期望 {len(articles_to_add)} 个。回退到逐个插入"
-            )
-            raise ValueError("批量插入不完整")
-        
-        # 检查是否有 None 值（表示插入失败）
-        if None in article_ids:
-            logger.warning("批量插入包含失败项（None值），回退到逐个插入")
-            raise ValueError("批量插入包含失败项")
-        
-        # 准备阅读数记录（需要article_id）
-        # 确保索引对应关系正确
-        if len(read_counts_to_add) != len(articles_to_add):
-            logger.warning(
-                f"阅读数记录数量不匹配: read_counts_to_add={len(read_counts_to_add)}, articles_to_add={len(articles_to_add)}"
-            )
-            raise ValueError("阅读数记录数量不匹配")
+    if not articles_to_add:
+        return processed_results
+    
+    article_ids = add_articles_batch(articles_to_add)
+    
+    # 验证返回的 ID 数量与输入一致
+    if len(article_ids) != len(articles_to_add):
+        error_msg = f"批量插入失败: 返回 {len(article_ids)} 个ID, 期望 {len(articles_to_add)} 个"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    
+    # 检查是否有 None 值（表示插入失败）
+    if None in article_ids:
+        error_msg = "批量插入包含失败项（None值）"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    
+    # 准备阅读数记录（需要article_id）
+    if len(read_counts_to_add) != len(articles_to_add):
+        error_msg = f"阅读数记录数量不匹配: read_counts_to_add={len(read_counts_to_add)}, articles_to_add={len(articles_to_add)}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
 
-        read_count_records = []
-        for article_id, count_tuple in zip(article_ids, read_counts_to_add):
-            if article_id is not None and count_tuple:
-                read_count_records.append((article_id, count_tuple[0]))
-        
-        if read_count_records:
-            add_read_counts_batch(read_count_records)
-        
-        # 更新结果中的article_id（确保成功結果與返回ID對齊）
-        success_count = 0
-        article_idx = 0
-        for result in processed_results:
-            if result.get('success') and article_idx < len(article_ids):
-                result['data']['id'] = article_ids[article_idx]
-                article_idx += 1
-                success_count += 1
-        
-        logger.info(f"批量插入成功: {success_count} 篇文章")
-    except Exception as e:
-        logger.error(f"批量插入数据库失败: {e}，回退到逐个插入")
-        # 回退到逐个插入
-        for result in processed_results:
-            if result.get('success'):
-                try:
-                    article_id = add_article(
-                        result['data'].get('url'),
-                        result['data'].get('title'),
-                        result['data'].get('site')
-                    )
-                    add_read_count(article_id, result['data'].get('initial_count', 0))
-                    result['data']['id'] = article_id
-                except Exception as e2:
-                    logger.error(f"逐个插入失败 {result['data'].get('url')}: {e2}")
-                    result['success'] = False
-                    result['error'] = str(e2)
+    read_count_records = []
+    for article_id, count_tuple in zip(article_ids, read_counts_to_add):
+        if article_id is not None and count_tuple:
+            read_count_records.append((article_id, count_tuple[0]))
+    
+    if read_count_records:
+        add_read_counts_batch(read_count_records)
+    
+    # 更新结果中的article_id（确保成功結果與返回ID對齊）
+    article_idx = 0
+    for result in processed_results:
+        if result.get('success') and article_idx < len(article_ids):
+            result['data']['id'] = article_ids[article_idx]
+            article_idx += 1
+    
+    logger.info(f"批量插入成功: {len(articles_to_add)} 篇文章")
     
     return processed_results
 
@@ -318,28 +320,15 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
 def create_article():
     """添加文章"""
     data = request.json
-    url = normalize_url(data.get('url', '').strip())
+    url = data.get('url', '').strip()
     
     if not url:
         return jsonify({'success': False, 'error': 'URL不能为空'}), 400
     
-    # 验证URL
-    if not validate_url(url):
+    # 验证并规范化URL，检测平台
+    is_valid, normalized_url, site = validate_and_normalize_url(url)
+    if not is_valid:
         return jsonify({'success': False, 'error': '无效的URL格式（只支持 http/https）'}), 400
-    
-    try:
-        parsed = urlparse(url)
-    except (ValueError, AttributeError) as e:
-        logger.warning(f"URL解析失败 {url}: {e}")
-        return jsonify({'success': False, 'error': '无效的URL'}), 400
-    
-    # 检测网站类型
-    domain = parsed.netloc.lower()
-    site = None
-    for site_domain, site_name in SUPPORTED_SITES.items():
-        if site_domain in domain:
-            site = site_name
-            break
     
     # 检查平台是否在白名单中
     if not is_platform_allowed(site):
@@ -357,19 +346,19 @@ def create_article():
         async def fetch_title_and_count():
             crawler = await create_shared_crawler()
             try:
-                info = await extract_article_info(url, crawler)
+                info = await extract_article_info(normalized_url, crawler)
                 return info.get('title'), info.get('read_count')
             finally:
                 await crawler.__aexit__(None, None, None)
         
         title, count = asyncio.run(fetch_title_and_count())
     except Exception as e:
-        logger.warning(f"初次爬取失败 {url}: {e}")
+        logger.warning(f"初次爬取失败 {normalized_url}: {e}")
         count = None
         title = None
     
     try:
-        article_id = add_article(url, title=title, site=site)
+        article_id = add_article(normalized_url, title=title, site=site)
         
         # 立即保存初始阅读数（如果爬取失败则为0）
         initial_count = count if count is not None else 0
@@ -377,7 +366,7 @@ def create_article():
         
         return jsonify({
             'success': True,
-            'data': {'id': article_id, 'url': url, 'title': title, 'site': site, 'initial_count': initial_count}
+            'data': {'id': article_id, 'url': normalized_url, 'title': title, 'site': site, 'initial_count': initial_count}
         })
     except ValueError as e:
         logger.warning(f"添加文章參數錯誤: {e}")

@@ -460,8 +460,9 @@ async def extract_with_config_full(url: str, platform: str, crawler: Optional[As
             # 池已满，创建临时实例（使用上下文管理器确保正确清理）
             browser_config = _ensure_browser_config()
             async with AsyncWebCrawler(config=browser_config) as temp_crawler:
-                result = await temp_crawler.arun(url, config=crawler_config)
-                if not result.success:
+                # 使用 _crawl_with_shared 确保异常处理一致性
+                result = await _crawl_with_shared(url, temp_crawler, crawler_config)
+                if result is None:
                     return (None, None)
     
     # 如果配置了额外延迟，等待 JavaScript 渲染

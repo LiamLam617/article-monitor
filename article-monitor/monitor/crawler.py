@@ -285,7 +285,7 @@ async def _crawl_with_retry(article: dict, crawler=None, max_retries: int = 3, m
                 category_max_retries = _get_max_retries_for_category(last_error_category)
                 effective_max_retries = min(max_retries, category_max_retries)
                 
-                if attempt < effective_max_retries:
+                if attempt <= effective_max_retries:
                     logger.info(f"⚠️  提取失败（解析错误），将重试: {url} (尝试 {attempt + 1}/{effective_max_retries + 1})")
                     last_error = parse_error
                     continue
@@ -342,7 +342,7 @@ async def _crawl_with_retry(article: dict, crawler=None, max_retries: int = 3, m
             # 判断是否可重试
             is_retryable = _is_retryable_error(e)
             
-            if is_retryable and attempt < effective_max_retries:
+            if is_retryable and attempt <= effective_max_retries:
                 logger.warning(f"⚠️  可重试错误 [{last_error_category.value}] (尝试 {attempt + 1}/{effective_max_retries + 1}): {url} - {str(e)[:100]}")
                 continue
             else:

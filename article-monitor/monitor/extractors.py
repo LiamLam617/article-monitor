@@ -45,23 +45,46 @@ def _get_anti_scraping_manager() -> AntiScrapingManager:
 
 
 def _get_browser_config() -> BrowserConfig:
-    """获取浏览器配置（支持防反爬）"""
+    """获取浏览器配置（支持防反爬）
+    
+    优化：
+    - 添加性能优化参数，减少资源消耗
+    - 使用完整的 BrowserProfile 和 HTTP headers
+    - 整合 AntiScrapingManager 的配置
+    """
+    # 基础性能优化参数（适用于所有配置）
+    base_extra_args = [
+        '--disable-blink-features=AutomationControlled',
+        '--disable-infobars',
+        '--disable-dev-shm-usage',
+        '--no-sandbox',
+        '--disable-gpu',  # 禁用 GPU 加速（headless 模式）
+        '--disable-software-rasterizer',  # 禁用软件光栅化
+        '--disable-extensions',  # 禁用扩展
+        '--disable-plugins',  # 禁用插件
+        '--disable-images',  # 禁用图片加载（提升速度）
+    ]
+    
     if ANTI_SCRAPING_ENABLED:
         manager = _get_anti_scraping_manager()
         profile = manager.get_browser_profile()
+        # 获取完整的 HTTP 请求头（包含 Accept-Language、Sec-Ch-Ua、Referer 等）
+        headers = manager.get_http_headers()
+        
+        # 整合 extra_args：合并基础参数和防反爬参数
+        # 注意：window-size 已经在 viewport 中设置，不需要重复
+        extra_args = base_extra_args + [
+            '--disable-setuid-sandbox',  # 从 get_browser_config() 中添加
+        ]
         
         return BrowserConfig(
             headless=True,
             viewport_width=profile.viewport_width,
             viewport_height=profile.viewport_height,
             user_agent=profile.user_agent,
+            headers=headers,  # 添加完整的 HTTP 请求头，提升反检测能力
             verbose=False,
-            extra_args=[
-                '--disable-blink-features=AutomationControlled',
-                '--disable-infobars',
-                '--disable-dev-shm-usage',
-                '--no-sandbox',
-            ]
+            extra_args=extra_args
         )
     else:
         # 默认配置（不启用防反爬）
@@ -69,7 +92,8 @@ def _get_browser_config() -> BrowserConfig:
             headless=True,
             viewport_width=1280,
             viewport_height=800,
-            verbose=False
+            verbose=False,
+            extra_args=base_extra_args
         )
 
 def get_browser_config() -> BrowserConfig:
@@ -83,24 +107,24 @@ def ensure_browser_config() -> BrowserConfig:
 
 # 共享的浏览器配置（复用，避免重复创建）
 # 注意：这里使用函数动态生成，支持防反爬
-_SHARED_BROWSER_CONFIG = None  # 延迟初始化
+# 优化：对于防反爬模式，每次获取新配置以支持轮换；对于非防反爬模式，复用配置
+_SHARED_BROWSER_CONFIG = None  # 延迟初始化（仅用于非防反爬模式）
 
 
 def _ensure_browser_config() -> BrowserConfig:
-    """确保浏览器配置已初始化"""
+    """确保浏览器配置已初始化
+    
+    优化：对于防反爬模式，每次获取新配置以支持轮换和指纹一致性
+    对于非防反爬模式，复用配置以提升性能
+    """
     global _SHARED_BROWSER_CONFIG
+    # 如果启用防反爬，每次都获取新配置（支持轮换）
+    if ANTI_SCRAPING_ENABLED:
+        return _get_browser_config()
+    # 非防反爬模式，复用配置
     if _SHARED_BROWSER_CONFIG is None:
         _SHARED_BROWSER_CONFIG = _get_browser_config()
     return _SHARED_BROWSER_CONFIG
-
-
-# 默认的爬取配置
-_DEFAULT_CRAWLER_CONFIG = CrawlerRunConfig(
-    page_timeout=20000,  # 减少超时时间到20秒
-    remove_overlay_elements=True,
-    screenshot=False,  # 禁用截图以提升性能
-    wait_for=None,  # 不等待特定元素，直接爬取
-)
 
 
 async def create_shared_crawler():
@@ -185,6 +209,7 @@ async def _crawl_with_shared(url: str, crawler: AsyncWebCrawler, crawler_config:
     """使用共享浏览器实例爬取页面（内部函数）
     
     集成防反爬功能：人类化延迟
+    优化：区分不同类型的错误，提供更详细的日志
     """
     try:
         # 执行人类化延迟（如果启用）
@@ -194,10 +219,28 @@ async def _crawl_with_shared(url: str, crawler: AsyncWebCrawler, crawler_config:
         
         result = await crawler.arun(url, config=crawler_config)
         if not result.success:
+            # 记录失败原因（如果 result 有错误信息）
+            error_msg = getattr(result, 'error', '未知错误')
+            logger.debug(f"爬取失败 {url}: {error_msg}")
             return None
         return result
+    except asyncio.TimeoutError as e:
+        logger.warning(f"⏱️ 爬取超时 {url}: {e}")
+        return None
+    except ConnectionError as e:
+        logger.warning(f"🔌 连接错误 {url}: {e}")
+        return None
     except Exception as e:
-        logger.warning(f"爬取失败 {url}: {e}")
+        # 根据错误类型分类记录
+        error_str = str(e).lower()
+        if 'timeout' in error_str or 'timed out' in error_str:
+            logger.warning(f"⏱️ 超时错误 {url}: {e}")
+        elif 'connection' in error_str or 'network' in error_str:
+            logger.warning(f"🔌 网络错误 {url}: {e}")
+        elif 'ssl' in error_str or 'certificate' in error_str:
+            logger.warning(f"🔒 SSL错误 {url}: {e}")
+        else:
+            logger.warning(f"⚠️ 爬取失败 {url}: {e}")
         return None
 
 @lru_cache(maxsize=None)  # 无界缓存，因为模式数量有限且固定
@@ -339,62 +382,87 @@ async def extract_with_config_full(url: str, platform: str, crawler: Optional[As
     delay_before_return = config.get('delay_before_return', 0)  # 额外延迟（毫秒）
     js_extract = config.get('js_extract', False)  # 是否使用 JavaScript 提取
     
-    # 获取防反爬 JavaScript（隐身模式）
-    stealth_js = ""
-    if ANTI_SCRAPING_ENABLED and ANTI_SCRAPING_STEALTH_MODE:
+    # 获取防反爬配置（如果启用）
+    base_crawler_config = {}
+    js_parts = []
+    
+    if ANTI_SCRAPING_ENABLED:
         manager = _get_anti_scraping_manager()
-        stealth_js = manager.get_stealth_js()
+        # 获取基础防反爬配置
+        base_crawler_config = manager.get_crawler_config(
+            timeout=timeout,
+            wait_for=wait_for
+        )
+        # 如果防反爬配置中有 js_code，添加到 js_parts
+        if base_crawler_config.get('js_code'):
+            js_parts.append(base_crawler_config['js_code'])
+            # 移除 js_code，稍后合并所有 JS 代码
+            base_crawler_config.pop('js_code', None)
     
     # 平台特定的 JavaScript 提取逻辑
-    platform_js = ""
-    if config.get('js_extract', False):
-        if platform == 'sohu':
-            # 搜狐：wait_for 已确保数字加载完成，这里直接提取并注入标记
-            platform_js = """
-            (() => {
-                const pvEl = document.querySelector('em[data-role="pv"]');
-                if (pvEl) {
-                    const text = pvEl.textContent.trim();
-                    if (/^\\d+$/.test(text)) {
-                        // 在 HTML 中注入明确的标记，确保能被正则提取
-                        const marker = document.createElement('script');
-                        marker.type = 'text/plain';
-                        marker.id = 'sohu-pv-marker';
-                        marker.textContent = 'SOHU_PV_COUNT:' + text;
-                        document.head.appendChild(marker);
-                        console.log('Sohu PV injected:', text);
-                        return text;
-                    }
+    if js_extract and platform == 'sohu':
+        # 搜狐：wait_for 已确保数字加载完成，这里直接提取并注入标记
+        platform_js = """
+        (() => {
+            const pvEl = document.querySelector('em[data-role="pv"]');
+            if (pvEl) {
+                const text = pvEl.textContent.trim();
+                if (/^\\d+$/.test(text)) {
+                    // 在 HTML 中注入明确的标记，确保能被正则提取
+                    const marker = document.createElement('script');
+                    marker.type = 'text/plain';
+                    marker.id = 'sohu-pv-marker';
+                    marker.textContent = 'SOHU_PV_COUNT:' + text;
+                    document.head.appendChild(marker);
+                    console.log('Sohu PV injected:', text);
+                    return text;
                 }
-                return null;
-            })();
-            """
+            }
+            return null;
+        })();
+        """
+        js_parts.append(platform_js)
     
     # 合并 JavaScript 代码：先执行隐身脚本，再执行平台脚本
-    combined_js = stealth_js
-    if platform_js:
-        combined_js = f"{stealth_js}\n{platform_js}" if stealth_js else platform_js
+    combined_js = '\n'.join(js_parts) if js_parts else None
     
+    # 创建爬取配置（整合防反爬配置和平台特定配置）
     crawler_config = CrawlerRunConfig(
         page_timeout=timeout,
         wait_for=wait_for,
-        remove_overlay_elements=True,
-        screenshot=False,
+        remove_overlay_elements=base_crawler_config.get('remove_overlay_elements', True),  # 移除弹窗和遮罩层
+        screenshot=base_crawler_config.get('screenshot', False),  # 禁用截图以提升性能
         js_code=combined_js if combined_js else None
     )
     
     # 使用共享浏览器或创建新实例
     if crawler:
+        # 使用传入的共享浏览器实例
         result = await _crawl_with_shared(url, crawler, crawler_config)
         if result is None:
             return (None, None)
     else:
-        # 确保浏览器配置已初始化
-        browser_config = _ensure_browser_config()
-        async with AsyncWebCrawler(config=browser_config) as crawler_instance:
-            result = await crawler_instance.arun(url, config=crawler_config)
-            if not result.success:
-                return (None, None)
+        # 没有传入 crawler，尝试从浏览器池获取或创建临时实例
+        from .browser_pool import get_browser_pool
+        browser_pool = get_browser_pool()
+        
+        # 尝试从池中获取
+        pool_crawler = await browser_pool.acquire()
+        if pool_crawler:
+            try:
+                result = await _crawl_with_shared(url, pool_crawler, crawler_config)
+                if result is None:
+                    return (None, None)
+            finally:
+                # 确保释放回池中
+                await browser_pool.release(pool_crawler)
+        else:
+            # 池已满，创建临时实例（使用上下文管理器确保正确清理）
+            browser_config = _ensure_browser_config()
+            async with AsyncWebCrawler(config=browser_config) as temp_crawler:
+                result = await temp_crawler.arun(url, config=crawler_config)
+                if not result.success:
+                    return (None, None)
     
     # 如果配置了额外延迟，等待 JavaScript 渲染
     if delay_before_return > 0:

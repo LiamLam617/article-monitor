@@ -97,14 +97,17 @@ class BrowserPool:
             return False
     
     async def _create_crawler(self) -> AsyncWebCrawler:
-        """创建新的浏览器实例"""
-        if ANTI_SCRAPING_ENABLED and ANTI_SCRAPING_ROTATE_UA:
-            browser_config = get_browser_config()
-        else:
-            browser_config = ensure_browser_config()
+        """创建新的浏览器实例
+        
+        优化：确保每个浏览器实例使用一致的配置
+        对于防反爬模式，每次创建时获取新配置（支持轮换）
+        """
+        # 获取浏览器配置（防反爬模式下每次获取新配置以支持轮换）
+        browser_config = get_browser_config()
         
         crawler = AsyncWebCrawler(config=browser_config)
         await crawler.__aenter__()
+        logger.debug(f"创建浏览器实例，配置已固定（User-Agent: {browser_config.user_agent[:50] if browser_config.user_agent else 'N/A'}...）")
         return crawler
     
     async def _cleanup_idle(self):

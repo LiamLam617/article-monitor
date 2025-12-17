@@ -203,7 +203,7 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
             # 检查平台是否在白名单中
             if not is_platform_allowed(site):
                 return idx, {
-                    'url': normalized_url,
+                    'url': url,
                     'success': False,
                     'error': f'平台 "{site or "未知"}" 不在允许列表中，已跳过'
                 }

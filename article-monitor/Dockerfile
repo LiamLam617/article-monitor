@@ -48,8 +48,8 @@ USER monitor
 
 EXPOSE 5000
 
-# 健康检查（使用 Python 腳本，更可靠）
+# 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python3 /app/healthcheck.py
+    CMD curl -f http://localhost:5000/ || exit 1
 
 CMD ["python", "run_monitor.py"]

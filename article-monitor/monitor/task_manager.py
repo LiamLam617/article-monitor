@@ -147,8 +147,15 @@ class TaskManager:
         with self._task_lock:
             loop_ref = self._event_loop
 
+        # 如果事件循環未運行，嘗試重啟工作線程
         if not loop_ref or not loop_ref.is_running():
-            raise RuntimeError("事件循環未就緒，無法提交任務")
+            logger.warning("事件循環未運行，嘗試重啟工作線程")
+            self._start_worker()
+            # 等待事件循環啟動
+            if not self._loop_ready.wait(timeout=5.0):
+                raise RuntimeError("重啟任務管理器事件循環超時")
+            with self._task_lock:
+                loop_ref = self._event_loop
 
         try:
             asyncio.run_coroutine_threadsafe(

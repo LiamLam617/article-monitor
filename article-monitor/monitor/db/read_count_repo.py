@@ -158,7 +158,8 @@ def get_aggregated_read_counts(
         where_clause = "strftime('%Y-%m-%d', timestamp) >= ? AND strftime('%Y-%m-%d', timestamp) <= ?"
         params = [start_date, end_date]
     elif days:
-        where_clause = "timestamp < datetime('now', '-' || ? || ' days')"
+        # 篩選「最近 N 天內」的記錄（用於彙總最近 N 天閱讀數）
+        where_clause = "timestamp >= datetime('now', '-' || ? || ' days')"
         params = [days]
 
     cursor.execute(

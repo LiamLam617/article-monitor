@@ -1,11 +1,12 @@
 """
 浏览器实例池 - 复用浏览器实例，减少创建开销
 优化：管理浏览器实例生命周期，提升性能和稳定性
+池锁按事件循环懒创建，避免爬取在子线程的 loop 中运行时出现「bound to a different event loop」
 """
 import asyncio
 import threading
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict
 from collections import deque
 from datetime import datetime, timedelta
 from crawl4ai import AsyncWebCrawler
@@ -13,6 +14,21 @@ from .extractors import get_browser_config, ensure_browser_config
 from .config import ANTI_SCRAPING_ENABLED, ANTI_SCRAPING_ROTATE_UA
 
 logger = logging.getLogger(__name__)
+
+
+def _get_pool_lock_for_loop(
+    pool_lock_guard: threading.Lock,
+    pool_lock_by_loop: Dict[asyncio.AbstractEventLoop, asyncio.Lock],
+) -> asyncio.Lock:
+    """返回当前事件循环对应的池锁（懒创建，线程安全）。仅可在 async 上下文中调用。"""
+    loop = asyncio.get_running_loop()
+    with pool_lock_guard:
+        for closed_loop in [loop for loop in pool_lock_by_loop if loop.is_closed()]:
+            pool_lock_by_loop.pop(closed_loop, None)
+        if loop not in pool_lock_by_loop:
+            pool_lock_by_loop[loop] = asyncio.Lock()
+        return pool_lock_by_loop[loop]
+
 
 class BrowserPool:
     """浏览器实例池（单例模式）"""
@@ -31,7 +47,8 @@ class BrowserPool:
         if self._initialized:
             return
         self._initialized = True
-        self._pool_lock = asyncio.Lock()
+        self._pool_lock_guard = threading.Lock()
+        self._pool_lock_by_loop: Dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
         self._pool: deque = deque()
         self._in_use: set = set()
         self._max_size = 5  # 最大池大小
@@ -40,9 +57,14 @@ class BrowserPool:
         self._last_cleanup = datetime.now()
         self._cleanup_interval = 60  # 清理间隔（秒）
     
+    def _get_pool_lock(self) -> asyncio.Lock:
+        """返回当前事件循环对应的池锁（仅可在 async 上下文中调用）。"""
+        return _get_pool_lock_for_loop(self._pool_lock_guard, self._pool_lock_by_loop)
+    
     async def acquire(self) -> Optional[AsyncWebCrawler]:
         """获取浏览器实例"""
-        async with self._pool_lock:
+        pool_lock = self._get_pool_lock()
+        async with pool_lock:
             # 清理空闲实例
             await self._cleanup_idle()
             
@@ -70,7 +92,8 @@ class BrowserPool:
     
     async def release(self, crawler: AsyncWebCrawler):
         """释放浏览器实例回池"""
-        async with self._pool_lock:
+        pool_lock = self._get_pool_lock()
+        async with pool_lock:
             if crawler in self._in_use:
                 self._in_use.remove(crawler)
                 # 检查实例是否仍然有效
@@ -148,7 +171,8 @@ class BrowserPool:
     
     async def close_all(self):
         """关闭所有浏览器实例"""
-        async with self._pool_lock:
+        pool_lock = self._get_pool_lock()
+        async with pool_lock:
             # 关闭池中的实例
             while self._pool:
                 crawler = self._pool.popleft()

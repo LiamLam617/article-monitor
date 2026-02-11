@@ -22,6 +22,16 @@ CRAWL_CONCURRENCY = min(int(os.getenv('CRAWL_CONCURRENCY', '5')), 10)
 # 爬取延迟（秒，每个请求之间的延迟，0表示无延迟，建议0.5-1秒）
 CRAWL_DELAY = float(os.getenv('CRAWL_DELAY', '1'))
 
+# 每域名并发数（同一站点同时最多 N 个请求；0 表示不限制，沿用全局并发）
+# 降低可提高同一站点大量文章时的成功率，避免触发反爬
+CRAWL_CONCURRENCY_PER_DOMAIN = max(0, int(os.getenv('CRAWL_CONCURRENCY_PER_DOMAIN', '1')))
+
+# 是否按站点交错调度（round-robin 按 site 打散顺序，使并发更均匀分布在多站点）
+CRAWL_INTERLEAVE_BY_SITE = os.getenv('CRAWL_INTERLEAVE_BY_SITE', 'True').lower() in ('true', '1', 'yes')
+
+# 同一域名两次请求之间的最小间隔（秒；0 表示不限制）
+CRAWL_MIN_DELAY_PER_DOMAIN = max(0.0, float(os.getenv('CRAWL_MIN_DELAY_PER_DOMAIN', '0')))
+
 # 重试配置
 CRAWL_MAX_RETRIES = int(os.getenv('CRAWL_MAX_RETRIES', '10'))  # 最大重试次数（网络错误）
 CRAWL_RETRY_DELAY = float(os.getenv('CRAWL_RETRY_DELAY', '2'))  # 重试延迟（秒）

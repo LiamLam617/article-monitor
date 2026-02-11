@@ -822,9 +822,10 @@ print(f'共有 {len(history)} 條記錄')
 
 1. **URL 格式**: 只支持 `http://` 和 `https://` 協議
 2. **平台白名單**: 可以通過環境變量 `ALLOWED_PLATFORMS` 配置允許的平台
-3. **批量添加**: 超過 5 個 URL 會使用異步任務，需要通過任務 API 查詢進度
-4. **日期格式**: 所有日期參數使用 `YYYY-MM-DD` 格式
-5. **時區**: 系統使用 `Asia/Shanghai` 時區
+3. **同一站點大量文章時成功率**: 可透過環境變數優化：`CRAWL_CONCURRENCY_PER_DOMAIN`（每域名並發數，預設 1）、`CRAWL_INTERLEAVE_BY_SITE`（按站點交錯排序，預設 True）、`CRAWL_MIN_DELAY_PER_DOMAIN`（同域名最小間隔秒數，預設 0）。詳見 `docs/RUNBOOK.md`。
+4. **批量添加**: 超過 5 個 URL 會使用異步任務，需要通過任務 API 查詢進度
+5. **日期格式**: 所有日期參數使用 `YYYY-MM-DD` 格式
+6. **時區**: 系統使用 `Asia/Shanghai` 時區
 
 ---
 

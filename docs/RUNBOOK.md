@@ -104,6 +104,31 @@
   - `FLASK_HOST` / `FLASK_PORT` 是否被防火牆或其他服務占用
   - 日誌中是否有 traceback（建議在啟動腳本中將輸出重導至檔案）
 
+### 問題：Playwright 報錯「Executable doesn't exist」/ 瀏覽器未安裝
+
+爬蟲依賴 Playwright 的 Chromium，需先安裝瀏覽器。**請用虛擬環境裡的 Python 以模組方式執行**（`playwright` 不是系統指令）：
+
+- **Windows（PowerShell）**，在專案根目錄或 `article-monitor/` 下。**請分兩行執行**（先啟用 venv，再執行安裝）：
+  ```powershell
+  .venv\Scripts\Activate.ps1
+  python -m playwright install chromium
+  ```
+  或一行（用分號隔開）：
+  ```powershell
+  .venv\Scripts\Activate.ps1; python -m playwright install chromium
+  ```
+- **Windows（不啟用 venv）**：直接指定 venv 的 Python（一條指令即可）：
+  ```powershell
+  .venv\Scripts\python.exe -m playwright install chromium
+  ```
+- **Linux / macOS**：
+  ```bash
+  source .venv/bin/activate
+  python -m playwright install chromium
+  ```
+
+僅安裝 Chromium 即可；若需完整瀏覽器可改為 `python -m playwright install`。
+
 ### 問題：爬取速度過慢或頻繁逾時
 
 - 檢查並調整環境變數：
@@ -115,6 +140,16 @@
   - `ANTI_SCRAPING_ENABLED`
   - `ANTI_SCRAPING_RANDOM_DELAY`
   - `ANTI_SCRAPING_STEALTH_MODE`
+
+### 問題：同一站點大量文章時成功率下降
+
+當監控列表中同一網站（例如大量掘金文章）佔比高時，並發請求容易觸發該站點限流或反爬，導致成功率降低。可透過以下環境變數優化：
+
+- **`CRAWL_CONCURRENCY_PER_DOMAIN`**（預設 `1`）：同一域名（netloc）允許的最大並發請求數。設為 `1` 可避免同一站點被多個請求同時打；設為 `0` 表示不限制（沿用全域並發）。
+- **`CRAWL_INTERLEAVE_BY_SITE`**（預設 `True`）：是否按站點交錯排序再爬取（round-robin），使並發更均勻分布在多個站點，減少單站短時間內請求密度。
+- **`CRAWL_MIN_DELAY_PER_DOMAIN`**（預設 `0`）：同一域名兩次請求之間的最小間隔（秒）。設為 `1` 或更大可進一步降低觸發限流的機率；`0` 表示不強制間隔。
+
+建議：若觀察到某站點失敗率明顯偏高，可將 `CRAWL_CONCURRENCY_PER_DOMAIN=1` 並保持 `CRAWL_INTERLEAVE_BY_SITE=True`，必要時加上 `CRAWL_MIN_DELAY_PER_DOMAIN=1`。
 
 ### 問題：某些平台永遠失敗
 

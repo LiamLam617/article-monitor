@@ -1,121 +1,162 @@
- # Contributing to Article Monitor
+# Contributing to Article Monitor
 
-這份文檔說明本專案的開發流程、腳本與測試方式，方便你在本機開發與提交改動。
+Development workflow, available scripts, environment setup, and testing. Single source of truth: `article-monitor/.env.example`, `article-monitor/run_monitor.py`, `article-monitor/scripts/`, `article-monitor/monitor/config.py`.
 
-## 開發環境設定
+## Development environment
 
-- 建議 Python 版本：**3.11+**
-- 建議步驟：
-  1. 建立虛擬環境
-     ```bash
-     python -m venv .venv
-     .venv\Scripts\activate  # Windows PowerShell
-     ```
-  2. 安裝依賴（在 `article-monitor/` 目錄下）
-     ```bash
-     pip install -r requirements.txt
-     ```
+- **Python**: 3.11+
+- **Working directory**: `article-monitor/` (repo root is one level up)
 
-後端應用程式碼位於 `monitor/` 子目錄；測試都放在 `tests/`。
+### Setup
 
-## 可用腳本（Python 專案）
+1. Create virtual environment and install dependencies:
 
-此專案目前 **沒有 `package.json`**，所有腳本都以 Python 命令方式執行：
+   **Option A – PowerShell script (Windows)**  
+   From repo root:
+   ```powershell
+   .\article-monitor\scripts\install_venv.ps1
+   ```
+   Then activate: `article-monitor\.venv\Scripts\Activate.ps1`
 
-| 動作                     | 指令（從 `article-monitor/` 執行）                             | 說明                              |
-|--------------------------|----------------------------------------------------------------|-----------------------------------|
-| 啟動 Web 服務           | `python run_monitor.py`                                       | 啟動 Flask 服務（預設 127.0.0.1） |
-| 直接從模組啟動           | `cd monitor && python app.py`                                | 直接用原始 `monitor/app.py` 啟動  |
-| 執行全部測試            | `cd article-monitor && python -m pytest --cov=monitor -q`     | 執行 pytest 並產生覆蓋率          |
-| 指定某個測試檔          | `cd article-monitor && python -m pytest tests/test_xxx.py -q` | 只跑單一測試檔                    |
+   **Option B – Manual**
+   ```bash
+   cd article-monitor
+   python -m venv .venv
+   .venv\Scripts\activate   # Windows
+   # source .venv/bin/activate  # Linux/macOS
+   pip install -r monitor/requirements.txt
+   ```
 
-> 單一來源（Single Source of Truth）：上述指令來自 `monitor/README.md` 與實際測試流程。
+2. (Required for crawl) Install Playwright Chromium:
+   ```bash
+   python -m playwright install chromium
+   ```
 
-## 環境變數與設定
+3. Copy env template and set values as needed:
+   ```bash
+   cp .env.example .env
+   ```
 
-本專案目前 **沒有 `.env.example`** 檔案，設定主要由 `monitor/config.py` 中的環境變數控制：
+Application code lives in `monitor/`; tests in `tests/`.
 
-- 資料庫與日誌
-  - `ARTICLE_MONITOR_DEBUG_LOG`：可選的 debug 日誌檔路徑
-- 爬蟲行為
-  - `CRAWL_INTERVAL_HOURS`：爬取週期（小時）
-  - `CRAWL_TIMEOUT`：單次請求逾時秒數
-  - `CRAWL_CONCURRENCY`：並發爬取數
-  - `CRAWL_DELAY`：每個請求之間延遲秒數
-  - `CRAWL_MAX_RETRIES` / `CRAWL_RETRY_DELAY` / `CRAWL_RETRY_BACKOFF` / `CRAWL_RETRY_MAX_DELAY` / `CRAWL_RETRY_JITTER`
-  - `CRAWL_RETRY_NETWORK_MAX` / `CRAWL_RETRY_PARSE_MAX` / `CRAWL_RETRY_SSL_MAX` / `CRAWL_RETRY_SSL_DELAY`
-- 防反爬
-  - `ANTI_SCRAPING_ENABLED`
-  - `ANTI_SCRAPING_ROTATE_UA`
-  - `ANTI_SCRAPING_RANDOM_DELAY`
-  - `ANTI_SCRAPING_STEALTH_MODE`
-  - `ANTI_SCRAPING_MIN_DELAY` / `ANTI_SCRAPING_MAX_DELAY`
-  - `ANTI_SCRAPING_UA_ROTATION_MIN` / `ANTI_SCRAPING_UA_ROTATION_MAX`
-- Flask
-  - `FLASK_HOST`（預設 `127.0.0.1`）
-  - `FLASK_PORT`（預設 `5001`）
-  - `FLASK_DEBUG`
-- 平台白名單
-  - `ALLOWED_PLATFORMS`：以逗號分隔的平台名稱（例如：`juejin,csdn,cnblog`）
+---
 
-建議在本機自行建立 `.env` 或使用系統環境變數，勿在程式碼中硬編碼任何密鑰或憑證。
+## Available scripts / commands
 
-## 開發流程建議
+No `package.json`; all commands are Python/shell. Run from `article-monitor/` unless noted.
 
-1. **建立分支**
-   - 以功能為單位建立分支（例如：`feat/crawler-tests`、`fix/export-bom`）。
-2. **TDD 開發**
-   - 依照專案規則，先寫測試再實作：
-     1. RED：撰寫失敗的測試
-     2. GREEN：最小實作讓測試通過
-     3. REFACTOR：重構、清理、提取共用函式
-3. **執行測試與覆蓋率**
-   - `python -m pytest --cov=monitor -q`
-4. **程式風格與安全性**
-   - 保持函式精簡（< 50 行）、檔案聚焦（< 800 行）
-   - 避免可變共享狀態，偏好不可變資料結構
-   - 所有外部輸入都要做驗證
-5. **提交前自我檢查**
-   - 測試全部通過
-   - 沒有硬編碼秘密（token / password / API key 等）
-   - 無多餘的 `print` / 除錯程式碼
+| Action | Command | Description |
+|--------|---------|-------------|
+| Install venv + deps | `scripts/install_venv.ps1` (from repo root) | Creates `.venv`, installs from `monitor/requirements.txt` |
+| Start web app | `python run_monitor.py` | Starts Flask + scheduler (default `127.0.0.1:5001`) |
+| Start from module | `cd monitor && python -m flask --app app run` or run `app.py` | Alternative start; port from env |
+| Run all tests | `python -m pytest tests/ -q` | Pytest, quiet |
+| Tests + coverage | `python -m pytest --cov=monitor --cov-report=term-missing -q` | Coverage report |
+| Coverage 80% gate | `python -m pytest --cov=monitor --cov-fail-under=80 -q` | Fails if under 80% (see `.coveragerc`) |
+| Single test file | `python -m pytest tests/test_xxx.py -v` | One file, verbose |
+| Compile check | `python -m compileall monitor` | Syntax check |
 
-## 測試流程
+---
 
-- 全部測試：
+## Environment variables
+
+Defined in `monitor/config.py`; template: `article-monitor/.env.example`. Do not commit secrets; use `.env` (gitignored) or system env.
+
+| Variable | Purpose | Format / default |
+|----------|----------|-------------------|
+| `ARTICLE_MONITOR_DEBUG_LOG` | Optional debug log file path | Path string; empty = disabled |
+| `CRAWL_INTERVAL_HOURS` | Crawl interval (hours) | Integer, default `6` |
+| `CRAWL_TIMEOUT` | Request timeout (seconds) | Integer, default `60` |
+| `CRAWL_CONCURRENCY` | Concurrent crawl requests (capped 1–10) | Integer, default `5` |
+| `CRAWL_DELAY` | Delay between requests (seconds) | Float, default `1` |
+| `CRAWL_CONCURRENCY_PER_DOMAIN` | Max concurrent per domain; 0 = no limit | Integer, default `1` |
+| `CRAWL_INTERLEAVE_BY_SITE` | Round-robin by site | `True`/`False`, default `True` |
+| `CRAWL_MIN_DELAY_PER_DOMAIN` | Min delay between same-domain requests (seconds) | Float, default `0` |
+| `CRAWL_MAX_RETRIES` | Max retries (network) | Integer, default `10` |
+| `CRAWL_RETRY_DELAY` | Retry delay (seconds) | Float, default `2` |
+| `CRAWL_RETRY_BACKOFF` | Backoff multiplier | Float, default `1.5` |
+| `CRAWL_RETRY_MAX_DELAY` | Max retry delay (seconds) | Float, default `30` |
+| `CRAWL_RETRY_JITTER` | Add jitter to retries | `True`/`False`, default `True` |
+| `CRAWL_RETRY_NETWORK_MAX` | Max retries for network errors | Integer, default `10` |
+| `CRAWL_RETRY_PARSE_MAX` | Max retries for parse errors | Integer, default `3` |
+| `CRAWL_RETRY_SSL_MAX` | Max retries for SSL errors | Integer, default `5` |
+| `CRAWL_RETRY_SSL_DELAY` | Fixed delay for SSL retries (seconds) | Float, default `5` |
+| `ANTI_SCRAPING_ENABLED` | Enable anti-scraping behaviour | `True`/`False`, default `True` |
+| `ANTI_SCRAPING_ROTATE_UA` | Rotate User-Agent | `True`/`False`, default `True` |
+| `ANTI_SCRAPING_RANDOM_DELAY` | Random delay between requests | `True`/`False`, default `True` |
+| `ANTI_SCRAPING_STEALTH_MODE` | Stealth mode (hide automation) | `True`/`False`, default `True` |
+| `ANTI_SCRAPING_MIN_DELAY` | Min random delay (seconds) | Float, default `1.0` |
+| `ANTI_SCRAPING_MAX_DELAY` | Max random delay (seconds) | Float, default `5.0` |
+| `ANTI_SCRAPING_UA_ROTATION_MIN` | UA rotation interval (requests) | Integer, default `10` |
+| `ANTI_SCRAPING_UA_ROTATION_MAX` | UA rotation interval (requests) | Integer, default `30` |
+| `FLASK_HOST` | Flask bind address | Default `127.0.0.1` |
+| `FLASK_PORT` | Flask port | Integer, default `5001` |
+| `FLASK_DEBUG` | Flask debug mode | `True`/`False`, default `False` |
+| `ALLOWED_PLATFORMS` | Platform whitelist (comma-separated) | e.g. `juejin,csdn,cnblog`; empty = default list |
+| `FEISHU_APP_ID` | Feishu app ID (Bitable sync) | String |
+| `FEISHU_APP_SECRET` | Feishu app secret | String |
+| `FEISHU_BITABLE_APP_TOKEN` | Bitable app token | String |
+| `FEISHU_BITABLE_TABLE_ID` | Bitable table ID | String |
+| `FEISHU_BITABLE_FIELD_URL` | Bitable column name for URL | Default `发布链接` |
+| `FEISHU_BITABLE_FIELD_TOTAL_READ` | Bitable column for total read count | Default `总阅读量` |
+| `FEISHU_BITABLE_FIELD_READ_24H` | Bitable column for 24h read | Default `24小时阅读量` |
+| `FEISHU_BITABLE_FIELD_READ_72H` | Bitable column for 72h read | Default `72小时总阅读量` |
+| `FEISHU_BITABLE_FIELD_ERROR` | Bitable column for error message | Default `失败原因` |
+| `FEISHU_BITABLE_ERROR_MESSAGE_MAX_LEN` | Max length of error written to Bitable (100–500) | Integer, default `200` |
+
+---
+
+## Development workflow
+
+1. **Branch**  
+   Create a feature/fix branch (e.g. `feat/bitable-sync`, `fix/export-bom`).
+
+2. **TDD**  
+   - RED: write failing test  
+   - GREEN: minimal implementation to pass  
+   - REFACTOR: clean up, extract helpers  
+
+3. **Quality**  
+   - Keep functions &lt; 50 lines, files &lt; 800 lines  
+   - Prefer immutable data; validate all external input  
+   - No hardcoded secrets; no debug prints in committed code  
+
+4. **Before commit**  
+   - `python -m pytest --cov=monitor -q`  
+   - `python -m compileall monitor`  
+   - Ensure no CRITICAL/HIGH issues from security/code review
+
+---
+
+## Testing
+
+- **Run all tests (from `article-monitor/`)**  
   ```bash
-  cd article-monitor
-  python -m pytest --cov=monitor -q
+  python -m pytest tests/ -q
   ```
 
-- 覆蓋率報告（含遺漏行、80% 門檻、HTML 報告）：
+- **With coverage and 80% gate**  
   ```bash
-  cd article-monitor
-  python -m pytest --cov=monitor --cov-report=term-missing --cov-report=html --cov-fail-under=80
+  python -m pytest --cov=monitor --cov-report=term-missing --cov-fail-under=80 -q
   ```
-  設定檔為 `article-monitor/.coveragerc`（source=monitor，fail_under=80）。  
-  `monitor/extractors.py` 與 `monitor/anti_scraping.py` 因依賴真實瀏覽器或複雜 UA/stealth 邏輯，目前自覆蓋率計算中排除；其餘模組以 80% 為目標。
+  Config: `.coveragerc` (source `monitor`, excludes `tests/`, `extractors.py`, `anti_scraping.py`).
 
-- 僅產生 JSON 摘要（可給工具讀取）：
+- **HTML coverage report**  
   ```bash
-  python -m pytest --cov=monitor --cov-report=json -q
+  python -m pytest --cov=monitor --cov-report=html -q
   ```
+  Open `htmlcov/index.html`.
 
-- 只跑單一檔案：
+- **Single file**  
   ```bash
-  cd article-monitor
-  python -m pytest tests/test_crawler.py -q
+  python -m pytest tests/test_app_routes.py -v
   ```
 
-目前目標是核心模組（例如 `crawler.py`、`article_service.py`、`url_utils.py` 等）覆蓋率 **≥ 80%**，整體覆蓋率會隨重構與補測逐步提升。
+Target: core modules (e.g. `crawler`, `article_service`, `url_utils`) ≥ 80% coverage; extractors/anti_scraping excluded due to browser/UA complexity.
 
-## Pull Request 建議
+---
 
-- PR 說明建議包含：
-  - 變更摘要（What / Why）
-  - 測試結果與指令
-  - 可能影響範圍（API 行為、資料庫結構、爬蟲策略等）
-- 提交前可先在本機執行「驗證指令」：
-  - 建置：`python -m compileall monitor`
-  - 測試：`python -m pytest --cov=monitor -q`
+## Pull requests
 
+- Describe what changed and why; note test commands and any impact on API/DB/crawl behaviour.
+- Pre-merge checks: tests pass, no hardcoded secrets, coverage acceptable.

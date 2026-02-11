@@ -20,6 +20,7 @@
   - [任務管理](#任務管理)
   - [失敗管理](#失敗管理)
   - [數據導出](#數據導出)
+  - [飛書 Bitable 同步](#飛書-bitable-同步)
   - [系統監控](#系統監控)
 
 ---
@@ -78,6 +79,7 @@ Article Monitor API 提供了一套完整的 RESTful API，用於管理文章監
 - `200 OK` - 請求成功
 - `400 Bad Request` - 請求參數錯誤
 - `404 Not Found` - 資源不存在
+- `429 Too Many Requests` - 請求過於頻繁（如 Bitable 同步限流）
 - `500 Internal Server Error` - 服務器內部錯誤
 
 ### 錯誤響應示例
@@ -621,9 +623,70 @@ GET /api/export/all-csv?start_date=2025-12-01&end_date=2025-12-09
 
 ---
 
+## 飛書 Bitable 同步
+
+### 18. Bitable 同步
+
+**端點**: `POST /api/bitable/sync`
+
+**描述**: 從飛書多維表格（Bitable）讀取「發布連結」列中的 URL，依序爬取各文章閱讀數，並將總閱讀量、24 小時 / 72 小時閱讀量及失敗原因寫回對應列。未傳的 `app_token` / `table_id` 時使用環境變數 `FEISHU_BITABLE_APP_TOKEN`、`FEISHU_BITABLE_TABLE_ID`；飛書自建應用需設定 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`（用於取得 [tenant_access_token](https://open.feishu.cn/document/server-docs/authentication-management/access-token/tenant_access_token_internal)）。
+
+**限流**: 全局限流，同一服務 60 秒內僅允許呼叫一次；過快回傳 `429`。
+
+**請求體**（所有欄位可選，未傳則使用環境變數或預設列名）:
+
+```json
+{
+  "app_token": "bitable_app_token",
+  "table_id": "table_id", 
+  "field_url": "发布链接",
+  "field_total_read": "总阅读量",
+  "field_read_24h": "24小时阅读量",
+  "field_read_72h": "72小时总阅读量",
+  "field_error": "失败原因"
+}
+```
+
+**請求參數**:
+- `app_token` (string, 可選) - Bitable 應用 token；未傳則用 `FEISHU_BITABLE_APP_TOKEN`
+- `table_id` (string, 可選) - 資料表 ID；未傳則用 `FEISHU_BITABLE_TABLE_ID`
+- `field_url` (string, 可選) - 存放文章 URL 的列名，預設「发布链接」
+- `field_total_read` (string, 可選) - 總閱讀量列名，預設「总阅读量」
+- `field_read_24h` (string, 可選) - 24 小時閱讀量列名，預設「24小时阅读量」
+- `field_read_72h` (string, 可選) - 72 小時閱讀量列名，預設「72小时总阅读量」
+- `field_error` (string, 可選) - 失敗原因列名，預設「失败原因」
+
+**成功響應** (200):
+
+```json
+{
+  "success": true,
+  "data": {
+    "processed": 10,
+    "updated": 8,
+    "failed": 2,
+    "errors": [
+      { "record_id": "recxxx", "url": "https://...", "error": "无效的URL格式" }
+    ]
+  }
+}
+```
+
+- `processed`: 處理的記錄數
+- `updated`: 成功寫回閱讀量的記錄數
+- `failed`: 爬取或寫入失敗的記錄數
+- `errors`: 失敗明細（含 `record_id`、`url`、`error`）
+
+**錯誤響應**:
+- **400** - 同步邏輯失敗（如缺少 app_token/table_id 或飛書設定），body 含 `success: false`、`error`、`processed`、`updated`、`failed`、`errors`
+- **429** - 請求過於頻繁，body 含 `success: false`、`error`: `"请求过于频繁，请稍后再试"`
+- **500** - 服務端異常，body 含 `success: false`、`error`: 通用錯誤訊息（詳細錯誤僅記錄於服務端日誌）
+
+---
+
 ## 系統監控
 
-### 18. 獲取系統健康狀態
+### 19. 獲取系統健康狀態
 
 **端點**: `GET /api/monitor/health`
 

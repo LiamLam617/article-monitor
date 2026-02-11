@@ -6,6 +6,7 @@ from flask_cors import CORS
 import asyncio
 import csv
 import io
+import time
 from datetime import datetime
 from typing import List, Optional
 from .database import (
@@ -18,7 +19,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 from .scheduler import start_scheduler
-from .config import FLASK_HOST, FLASK_PORT, FLASK_DEBUG, SUPPORTED_SITES, CRAWL_INTERVAL_HOURS, is_platform_allowed
+from .config import (
+    FLASK_HOST, FLASK_PORT, FLASK_DEBUG, SUPPORTED_SITES, CRAWL_INTERVAL_HOURS,
+    is_platform_allowed,
+)
+
+# Rate limit: min seconds between POST /api/bitable/sync calls (global)
+BITABLE_SYNC_RATE_LIMIT_SECONDS = 60
+_last_bitable_sync_time = 0.0
 from .url_utils import normalize_url, validate_and_normalize_url
 from .article_service import _process_urls_async, _process_urls_sync
 from .export_service import export_selected_articles_csv, export_all_articles_csv
@@ -463,6 +471,75 @@ def export_all_csv():
         import traceback
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/bitable/sync', methods=['POST'])
+def bitable_sync():
+    """从飞书 Bitable 拉取发布链接 → 爬取 → 写回总阅读量/失败原因。"""
+    global _last_bitable_sync_time
+    try:
+        now = time.time()
+        if now - _last_bitable_sync_time < BITABLE_SYNC_RATE_LIMIT_SECONDS:
+            return jsonify({
+                'success': False,
+                'error': '请求过于频繁，请稍后再试',
+            }), 429
+        _last_bitable_sync_time = now
+
+        data = request.json or {}
+        app_token = (data.get('app_token') or '').strip()
+        table_id = (data.get('table_id') or '').strip()
+        field_url = data.get('field_url')
+        field_total_read = data.get('field_total_read')
+        field_read_24h = data.get('field_read_24h')
+        field_read_72h = data.get('field_read_72h')
+        field_error = data.get('field_error')
+
+        result = None
+        try:
+            from .bitable_sync import sync_from_bitable
+            result = sync_from_bitable(
+                app_token=app_token or None,
+                table_id=table_id or None,
+                field_url=field_url,
+                field_total_read=field_total_read,
+                field_read_24h=field_read_24h,
+                field_read_72h=field_read_72h,
+                field_error=field_error,
+            )
+        except Exception as e:
+            logger.exception("Bitable 同步异常")
+            return jsonify({
+                'success': False,
+                'error': '同步处理失败，请稍后重试',
+                'processed': 0,
+                'updated': 0,
+                'failed': 0,
+                'errors': [],
+            }), 500
+
+        if not result.get('success') and result.get('message'):
+            return jsonify({
+                'success': False,
+                'error': result.get('message'),
+                'processed': result.get('processed', 0),
+                'updated': result.get('updated', 0),
+                'failed': result.get('failed', 0),
+                'errors': result.get('errors', []),
+            }), 400
+
+        return jsonify({
+            'success': True,
+            'data': {
+                'processed': result.get('processed', 0),
+                'updated': result.get('updated', 0),
+                'failed': result.get('failed', 0),
+                'errors': result.get('errors', []),
+            }
+        })
+    except Exception as e:
+        logger.exception("Bitable sync 请求处理异常")
+        return jsonify({'success': False, 'error': '服务器内部错误，请稍后重试'}), 500
+
 
 @app.route('/api/monitor/health', methods=['GET'])
 def get_system_health():

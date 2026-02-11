@@ -14,6 +14,7 @@
   - 週期性爬取閱讀數
   - 失敗重試與錯誤分類
   - CSV 導出
+  - 飛書 Bitable 同步（拉取發布連結 → 爬取 → 寫回閱讀量/失敗原因）
   - 系統健康檢查 API
 
 ## 部署流程
@@ -34,11 +35,12 @@
    pip install -r requirements.txt
    ```
 4. **設定環境變數**
-   - 建議使用 systemd service、docker-compose 或 shell 啟動腳本設定環境變數：
+   - 可複製 `article-monitor/.env.example` 為 `.env` 並填寫；或使用 systemd / docker-compose / shell 設定：
      - `FLASK_HOST`、`FLASK_PORT`
      - `CRAWL_INTERVAL_HOURS` 等爬蟲設定
      - `ALLOWED_PLATFORMS` 控制允許的平台
      - 防反爬相關變數（見 `monitor/config.py`）
+     - 若使用 Bitable 同步：`FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_BITABLE_APP_TOKEN`、`FEISHU_BITABLE_TABLE_ID`（見 `.env.example`）
 5. **啟動服務**
    - 直接啟動（開發 / 單機）：
      ```bash
@@ -93,6 +95,14 @@
 - 文章列表與最新閱讀數：`GET /api/articles`
 - 單篇文章歷史：`GET /api/articles/<id>/history`
 - 匯總統計：`GET /api/statistics`
+
+### 飛書 Bitable 同步
+
+- **`POST /api/bitable/sync`**  
+  從 Bitable 讀取「發布連結」列 → 爬取各 URL → 寫回總閱讀量、24h/72h 閱讀量、失敗原因。  
+  - Body（可選）：`app_token`、`table_id`、`field_url`、`field_total_read`、`field_read_24h`、`field_read_72h`、`field_error`；未傳則使用環境變數或 config 預設。  
+  - **Rate limit**：全局限流，同一服務 60 秒內僅允許一次呼叫；過快回傳 **429**（`请求过于频繁，请稍后再试`）。  
+  - 需設定 `FEISHU_APP_ID`、`FEISHU_APP_SECRET` 及 Bitable 的 `app_token`、`table_id`（環境變數或 body）。
 
 ## 常見問題與排除
 
@@ -158,6 +168,16 @@
   - 檢查錯誤分類（永久錯誤 / SSL / 網路 / 解析）
 - 若是該平台已不再支援或結構改變：
   - 可暫時從 `ALLOWED_PLATFORMS` 中移除，避免無效重試。
+
+### 問題：Bitable 同步回傳 429
+
+- `POST /api/bitable/sync` 有 60 秒全局限流，短時間內重複呼叫會回傳 429。
+- 處理：等待至少 60 秒再重試，或由排程/前端控制呼叫頻率。
+
+### 問題：Bitable 同步回傳 400（缺少設定）
+
+- 未設定 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，或未提供 Bitable 的 `app_token`、`table_id`（環境變數或請求 body）。
+- 處理：設定上述環境變數，或在請求 body 中傳入 `app_token`、`table_id`。
 
 ### 問題：磁碟空間不足
 

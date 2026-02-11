@@ -125,3 +125,28 @@ BATCH_PROCESS_CONCURRENCY = 5  # 批量處理的並發數
 # 健康檢查相關
 HEALTH_CHECK_TIMEOUT = 3  # 健康檢查超時時間（秒）
 MAX_HEALTH_CHECK_WORKERS = 20  # 健康檢查最大工作線程數
+
+# ==================== 飞书 Bitable 配置 ====================
+FEISHU_APP_ID = os.getenv('FEISHU_APP_ID', '').strip()
+FEISHU_APP_SECRET = os.getenv('FEISHU_APP_SECRET', '').strip()
+FEISHU_BITABLE_APP_TOKEN = os.getenv('FEISHU_BITABLE_APP_TOKEN', '').strip()
+FEISHU_BITABLE_TABLE_ID = os.getenv('FEISHU_BITABLE_TABLE_ID', '').strip()
+
+# Bitable 列名映射（与多维表格中的字段名一致，可被请求体覆盖）
+FEISHU_BITABLE_FIELD_URL = os.getenv('FEISHU_BITABLE_FIELD_URL', '发布链接')
+FEISHU_BITABLE_FIELD_TOTAL_READ = os.getenv('FEISHU_BITABLE_FIELD_TOTAL_READ', '总阅读量')
+FEISHU_BITABLE_FIELD_READ_24H = os.getenv('FEISHU_BITABLE_FIELD_READ_24H', '24小时阅读量')
+FEISHU_BITABLE_FIELD_READ_72H = os.getenv('FEISHU_BITABLE_FIELD_READ_72H', '72小时阅读量')
+FEISHU_BITABLE_FIELD_ERROR = os.getenv('FEISHU_BITABLE_FIELD_ERROR', '失败原因')
+
+# 写回 Bitable 时错误信息最大长度（字符）
+def _parse_error_message_max_len() -> int:
+    raw = os.getenv('FEISHU_BITABLE_ERROR_MESSAGE_MAX_LEN', '200').strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 200
+    return min(500, max(100, n))
+
+
+FEISHU_BITABLE_ERROR_MESSAGE_MAX_LEN = _parse_error_message_max_len()

@@ -45,12 +45,32 @@ async def _process_urls_sync(urls: List[str]):
     return await _process_batch(urls, browser_pool)
 
 
-async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
-    """处理一批URL"""
+async def crawl_urls_for_results(urls: List[str]) -> List[Dict]:
+    """仅爬取 URL 列表并返回结构化结果，不写入数据库。
+
+    供 Bitable 同步等仅需「爬取结果」的场景复用。
+
+    Returns:
+        与 urls 顺序对应的列表，每项为:
+        - 成功: {"url", "success": True, "data": {"title", "site", "read_count"}}
+        - 失败: {"url", "success": False, "error": str}
+    """
+    browser_pool = get_browser_pool()
+    batch_size = BATCH_PROCESS_SIZE
+    all_results: List[Dict] = []
+    for i in range(0, len(urls), batch_size):
+        batch_urls = urls[i : i + batch_size]
+        batch_results = await _crawl_batch_for_results(batch_urls, browser_pool)
+        all_results.extend(batch_results)
+    return all_results
+
+
+async def _crawl_batch_for_results(urls: List[str], browser_pool) -> List[dict]:
+    """爬取一批 URL，返回结果列表，不写库。"""
     processed_results: List[dict] = [None] * len(urls)
 
     async def process_single_url(idx: int, url: str):
-        normalized_url = url  # 初始化為原始 URL，作為異常情況的備用
+        normalized_url = url
         try:
             is_valid, normalized_url, site = validate_and_normalize_url(url)
             if not is_valid:
@@ -84,13 +104,14 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
                 else:
                     await crawler.__aexit__(None, None, None)
 
+            read_count = count if count is not None else 0
             return idx, {
                 'url': normalized_url,
                 'success': True,
                 'data': {
                     'title': title,
                     'site': site,
-                    'initial_count': count if count is not None else 0
+                    'read_count': read_count,
                 }
             }
         except Exception as e:
@@ -112,6 +133,13 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
             idx, payload = result
             processed_results[idx] = payload
 
+    return processed_results
+
+
+async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
+    """处理一批URL：先爬取，再写入 SQLite。"""
+    processed_results = await _crawl_batch_for_results(urls, browser_pool)
+
     articles_to_add = []
     read_counts_to_add = []
     for item in processed_results:
@@ -119,7 +147,7 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
             articles_to_add.append(
                 (item.get('url'), item['data'].get('title'), item['data'].get('site'))
             )
-            read_counts_to_add.append((item['data'].get('initial_count', 0),))
+            read_counts_to_add.append((item['data'].get('read_count', 0),))
 
     if not articles_to_add:
         return processed_results
@@ -156,6 +184,7 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
     for result in processed_results:
         if result.get('success') and article_idx < len(article_ids):
             result['data']['id'] = article_ids[article_idx]
+            result['data']['initial_count'] = result['data'].get('read_count', 0)
             article_idx += 1
 
     logger.info(f"批量插入成功: {len(articles_to_add)} 篇文章")

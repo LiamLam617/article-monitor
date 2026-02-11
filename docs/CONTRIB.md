@@ -88,6 +88,19 @@
   python -m pytest --cov=monitor -q
   ```
 
+- 覆蓋率報告（含遺漏行、80% 門檻、HTML 報告）：
+  ```bash
+  cd article-monitor
+  python -m pytest --cov=monitor --cov-report=term-missing --cov-report=html --cov-fail-under=80
+  ```
+  設定檔為 `article-monitor/.coveragerc`（source=monitor，fail_under=80）。  
+  `monitor/extractors.py` 與 `monitor/anti_scraping.py` 因依賴真實瀏覽器或複雜 UA/stealth 邏輯，目前自覆蓋率計算中排除；其餘模組以 80% 為目標。
+
+- 僅產生 JSON 摘要（可給工具讀取）：
+  ```bash
+  python -m pytest --cov=monitor --cov-report=json -q
+  ```
+
 - 只跑單一檔案：
   ```bash
   cd article-monitor

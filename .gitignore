@@ -10,10 +10,6 @@
 /.pydistutils.cfg
 /.ssh
 /.sudo_as_admin_successful
-article-monitor/tests/test_app_routes.py
-article-monitor/tests/test_article_service.py
-article-monitor/tests/test_crawler_progress.py
-article-monitor/tests/test_crawler.py
-article-monitor/tests/test_export_service.py
-article-monitor/tests/test_health_service.py
-article-monitor/tests/test_url_utils.py
+article-monitor/tests
+article-monitor/.coveragerc
+.claude

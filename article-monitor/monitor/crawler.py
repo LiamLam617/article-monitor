@@ -705,13 +705,14 @@ async def crawl_all_articles():
                     return False
 
             domain = _domain_from_article(article)
-            await _wait_domain_rate_limit(domain)
             domain_sem = await _get_domain_semaphore(domain)
 
             try:
                 if domain_sem is not None:
                     async with domain_sem:
+                        await _wait_domain_rate_limit(domain)
                         return await _do_retry_with_pool(article, index)
+                await _wait_domain_rate_limit(domain)
                 return await _do_retry_with_pool(article, index)
             finally:
                 await _record_domain_request_done(domain)

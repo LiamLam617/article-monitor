@@ -380,8 +380,6 @@ class AntiScrapingManager:
                 gl.getParameter = new Proxy(originalGetParameter, getParameterProxyHandler);
             }}
         }} catch(e) {{}}
-        
-        console.log('🛡️ Anti-detection scripts loaded');
         """
     
     def get_http_headers(self, url: str = None) -> Dict[str, str]:

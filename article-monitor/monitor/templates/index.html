@@ -852,6 +852,71 @@
             font-weight: bold;
         }
         
+        /* 网站分组头部样式 */
+        .site-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 16px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .site-header:hover {
+            background: #e9ecef;
+        }
+        
+        .site-header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex: 1;
+        }
+        
+        .site-toggle {
+            font-size: 12px;
+            color: #666;
+            transition: transform 0.2s;
+        }
+        
+        .site-name {
+            font-weight: 600;
+            color: #333;
+            font-size: 14px;
+        }
+        
+        .site-count {
+            color: #999;
+            font-size: 13px;
+        }
+        
+        .btn-site-select-all {
+            padding: 6px 16px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background 0.2s;
+            white-space: nowrap;
+        }
+        
+        .btn-site-select-all:hover {
+            background: #0056b3;
+        }
+        
+        .btn-site-select-all.secondary {
+            background: #6c757d;
+        }
+        
+        .btn-site-select-all.secondary:hover {
+            background: #5a6268;
+        }
+        
         .cache-panel {
             margin-top: 15px;
             padding-top: 15px;
@@ -1562,12 +1627,21 @@
                 const siteArticles = siteGroups[site];
                 const siteDisplayName = siteConfig[site]?.name || site;
                 
+                // 检查该平台的文章是否已全部在图表中
+                const allInChart = siteArticles.every(article => selectedArticles.has(article.id));
+                const selectAllBtnText = allInChart ? '取消全选' : '全选该平台';
+                
                 html += `
                     <div class="site-group" data-site="${site}">
-                        <div class="site-header" onclick="toggleSiteGroup('${site}')">
-                            <div class="site-toggle">▼</div>
-                            <span class="site-name">${siteDisplayName}</span>
-                            <span class="site-count">${siteArticles.length} 篇文章</span>
+                        <div class="site-header">
+                            <div class="site-header-left" onclick="toggleSiteGroup('${site}')">
+                                <div class="site-toggle">▼</div>
+                                <span class="site-name">${siteDisplayName}</span>
+                                <span class="site-count">${siteArticles.length} 篇文章</span>
+                            </div>
+                            <button class="btn-site-select-all" data-site="${site}" onclick="event.stopPropagation(); toggleSiteSelectAll('${site}')">
+                                ${selectAllBtnText}
+                            </button>
                         </div>
                         <div class="article-group">
                             ${siteArticles.map(article => {
@@ -2262,6 +2336,109 @@
                     button.textContent = inChart ? '从图表移除' : '添加到图表';
                     button.classList.toggle('secondary', inChart);
                 }
+                
+                // 更新所属平台的全选按钮状态
+                const siteGroup = articleItem.closest('.site-group');
+                if (siteGroup) {
+                    const site = siteGroup.getAttribute('data-site');
+                    if (site) {
+                        updateSiteSelectAllButton(site);
+                    }
+                }
+            }
+        }
+        
+        // 平台全选/取消全选
+        async function toggleSiteSelectAll(site) {
+            // 获取该平台的所有文章
+            const siteGroup = document.querySelector(`.site-group[data-site="${site}"]`);
+            if (!siteGroup) return;
+            
+            const articleItems = siteGroup.querySelectorAll('.article-item');
+            const siteArticles = [];
+            articleItems.forEach(item => {
+                const articleId = parseInt(item.getAttribute('data-article-id'));
+                const articleTitle = item.querySelector('.article-title')?.textContent || '';
+                if (articleId) {
+                    siteArticles.push({ id: articleId, title: articleTitle });
+                }
+            });
+            
+            if (siteArticles.length === 0) return;
+            
+            // 检查是否已全部在图表中
+            const allInChart = siteArticles.every(article => selectedArticles.has(article.id));
+            
+            if (allInChart) {
+                // 取消全选：批量移除
+                for (const article of siteArticles) {
+                    if (selectedArticles.has(article.id)) {
+                        selectedArticles.delete(article.id);
+                        delete articleHistories[article.id];
+                        updateArticleButton(article.id);
+                    }
+                }
+            } else {
+                // 全选：批量添加
+                for (const article of siteArticles) {
+                    if (!selectedArticles.has(article.id)) {
+                        await toggleArticleInChart(article.id, article.title);
+                    }
+                }
+            }
+            
+            // 更新平台全选按钮状态
+            updateSiteSelectAllButton(site);
+            
+            // 重新加载统计数据和图表
+            if (currentStartDate && currentEndDate) {
+                await loadStatistics(null, currentStartDate, currentEndDate);
+            } else {
+                await loadStatistics(currentTimeRange || 7);
+            }
+            
+            if (chartData) {
+                renderOverviewChart(chartData);
+            }
+        }
+        
+        // 更新平台全选按钮状态
+        function updateSiteSelectAllButton(site) {
+            const siteGroup = document.querySelector(`.site-group[data-site="${site}"]`);
+            if (!siteGroup) return;
+            
+            const articleItems = siteGroup.querySelectorAll('.article-item');
+            const siteArticles = [];
+            articleItems.forEach(item => {
+                const articleId = parseInt(item.getAttribute('data-article-id'));
+                if (articleId) {
+                    siteArticles.push({ id: articleId });
+                }
+            });
+            
+            if (siteArticles.length === 0) return;
+            
+            const allInChart = siteArticles.every(article => selectedArticles.has(article.id));
+            const button = siteGroup.querySelector('.btn-site-select-all');
+            
+            if (button) {
+                button.textContent = allInChart ? '取消全选' : '全选该平台';
+                button.classList.toggle('secondary', allInChart);
+            }
+        }
+        
+        // 切换网站分组展开/折叠
+        function toggleSiteGroup(site) {
+            const siteGroup = document.querySelector(`.site-group[data-site="${site}"]`);
+            if (!siteGroup) return;
+            
+            const articleGroup = siteGroup.querySelector('.article-group');
+            const siteToggle = siteGroup.querySelector('.site-toggle');
+            
+            if (articleGroup && siteToggle) {
+                const isHidden = articleGroup.style.display === 'none';
+                articleGroup.style.display = isHidden ? '' : 'none';
+                siteToggle.textContent = isHidden ? '▼' : '▶';
             }
         }
         

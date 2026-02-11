@@ -18,71 +18,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 from .scheduler import start_scheduler
-from urllib.parse import urlparse
 from .config import FLASK_HOST, FLASK_PORT, FLASK_DEBUG, SUPPORTED_SITES, CRAWL_INTERVAL_HOURS, is_platform_allowed
-
-
-def normalize_url(url: str) -> str:
-    """規範化 URL，修正已知平台的非標準格式"""
-    # 掘金: spost -> post
-    if 'juejin.cn' in url:
-        url = url.replace('/spost/', '/post/')
-    return url
-
-def validate_url(url: str) -> bool:
-    """驗證 URL 是否安全有效
-    
-    Args:
-        url: 要驗證的 URL
-        
-    Returns:
-        如果 URL 有效且安全，返回 True；否則返回 False
-    """
-    try:
-        parsed = urlparse(url)
-        # 只允許 http 和 https
-        if parsed.scheme not in ('http', 'https'):
-            return False
-        # 檢查域名是否為空
-        if not parsed.netloc:
-            return False
-        # 基本格式檢查通過
-        return True
-    except (ValueError, AttributeError):
-        return False
-
-def validate_and_normalize_url(url: str) -> tuple[bool, str, Optional[str]]:
-    """驗證並規範化 URL，檢測平台
-    
-    Args:
-        url: 原始 URL
-        
-    Returns:
-        (is_valid, normalized_url, site) 元組
-        - is_valid: URL 是否有效
-        - normalized_url: 規範化後的 URL
-        - site: 平台名稱（如果檢測到），否則為 None
-    """
-    url = normalize_url(url.strip())
-    
-    if not url:
-        return False, url, None
-    
-    if not validate_url(url):
-        return False, url, None
-    
-    try:
-        parsed = urlparse(url)
-        domain = parsed.netloc.lower()
-        site = None
-        for site_domain, site_name in SUPPORTED_SITES.items():
-            if site_domain in domain:
-                site = site_name
-                break
-        return True, url, site
-    except (ValueError, AttributeError) as e:
-        logger.debug(f"URL解析失败 {url}: {e}")
-        return False, url, None
+from .url_utils import normalize_url, validate_and_normalize_url
+from .article_service import _process_urls_async, _process_urls_sync
+from .export_service import export_selected_articles_csv, export_all_articles_csv
+from .health_service import get_system_health_payload
 
 app = Flask(__name__)
 CORS(app)
@@ -146,175 +86,15 @@ def create_articles_batch():
         })
 
 async def _process_urls_async(task_id: str, urls: List[str]):
-    """异步处理URL列表（用于任务队列）"""
-    from .task_manager import get_task_manager
-    task_manager = get_task_manager()
-    
-    results = []
-    total = len(urls)
-    
-    # 使用浏览器池
-    from .browser_pool import get_browser_pool
-    browser_pool = get_browser_pool()
-    
-    # 批量处理
-    from .config import BATCH_PROCESS_SIZE
-    batch_size = BATCH_PROCESS_SIZE
-    for i in range(0, total, batch_size):
-        batch_urls = urls[i:i+batch_size]
-        batch_results = await _process_batch(batch_urls, browser_pool)
-        results.extend(batch_results)
-        
-        # 更新进度
-        task_manager.update_task_progress(task_id, {
-            'processed': len(results),
-            'total': total,
-            'success': sum(1 for r in results if r.get('success')),
-            'failed': sum(1 for r in results if not r.get('success'))
-        })
-    
-    # 保存最终结果到任务
-    task = task_manager.get_task(task_id)
-    if task:
-        task['results'] = results
+    """異步處理 URL 列表（委派給 article_service）"""
+    from .article_service import _process_urls_async as svc_async
+    await svc_async(task_id, urls)
+
 
 async def _process_urls_sync(urls: List[str]):
-    """同步处理URL列表（用于小批量）"""
-    from .browser_pool import get_browser_pool
-    browser_pool = get_browser_pool()
-    return await _process_batch(urls, browser_pool)
-
-async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
-    """处理一批URL"""
-    from .extractors import extract_article_info
-    from .database import add_articles_batch, add_read_counts_batch
-    
-    processed_results: List[dict] = [None] * len(urls)
-    
-    # 并发处理URL
-    async def process_single_url(idx: int, url: str):
-        normalized_url = url  # 初始化為原始 URL，作為異常情況的備用
-        try:
-            # 验证并规范化URL，检测平台
-            is_valid, normalized_url, site = validate_and_normalize_url(url)
-            if not is_valid:
-                return idx, {'url': url, 'success': False, 'error': '无效的URL格式（只支持 http/https）'}
-            
-            # 检查平台是否在白名单中
-            if not is_platform_allowed(site):
-                return idx, {
-                    'url': url,
-                    'success': False,
-                    'error': f'平台 "{site or "未知"}" 不在允许列表中，已跳过'
-                }
-            
-            # 从浏览器池获取实例
-            crawler = await browser_pool.acquire()
-            if not crawler:
-                # 如果池已满，创建独立实例
-                from .extractors import create_shared_crawler
-                crawler = await create_shared_crawler()
-                use_pool = False
-            else:
-                use_pool = True
-            
-            try:
-                # 爬取标题和阅读数
-                info = await extract_article_info(normalized_url, crawler)
-                title = info.get('title')
-                count = info.get('read_count')
-            except Exception as e:
-                logger.warning(f"爬取失败 {url}: {e}")
-                title = None
-                count = None
-            finally:
-                if use_pool:
-                    await browser_pool.release(crawler)
-                else:
-                    await crawler.__aexit__(None, None, None)
-            
-            return idx, {
-                'url': normalized_url,
-                'success': True,
-                'data': {
-                    'title': title,
-                    'site': site,
-                    'initial_count': count if count is not None else 0
-                }
-            }
-        except Exception as e:
-            # normalized_url 總是在 try 塊開始時定義
-            return idx, {'url': normalized_url, 'success': False, 'error': str(e)}
-                
-    # 并发处理（限制并发数）
-    from .config import BATCH_PROCESS_CONCURRENCY
-    semaphore = asyncio.Semaphore(BATCH_PROCESS_CONCURRENCY)
-    
-    async def process_with_semaphore(idx: int, url: str):
-        async with semaphore:
-            return await process_single_url(idx, url)
-    
-    tasks = [process_with_semaphore(i, url) for i, url in enumerate(urls)]
-    gathered = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    # 处理结果，保持输入顺序
-    for i, result in enumerate(gathered):
-        if isinstance(result, Exception):
-            processed_results[i] = {'url': urls[i], 'success': False, 'error': str(result)}
-        else:
-            idx, payload = result
-            processed_results[idx] = payload
-    
-    # 按顺序收集成功的文章和阅读数
-    articles_to_add = []
-    read_counts_to_add = []
-    for item in processed_results:
-        if item and item.get('success'):
-            articles_to_add.append((item.get('url'), item['data'].get('title'), item['data'].get('site')))
-            read_counts_to_add.append((item['data'].get('initial_count', 0),))
-    
-    # 批量插入数据库
-    if not articles_to_add:
-        return processed_results
-    
-    article_ids = add_articles_batch(articles_to_add)
-    
-    # 验证返回的 ID 数量与输入一致
-    if len(article_ids) != len(articles_to_add):
-        error_msg = f"批量插入失败: 返回 {len(article_ids)} 个ID, 期望 {len(articles_to_add)} 个"
-        logger.error(error_msg)
-        raise ValueError(error_msg)
-    
-    # 检查是否有 None 值（表示插入失败）
-    if None in article_ids:
-        error_msg = "批量插入包含失败项（None值）"
-        logger.error(error_msg)
-        raise ValueError(error_msg)
-    
-    # 准备阅读数记录（需要article_id）
-    if len(read_counts_to_add) != len(articles_to_add):
-        error_msg = f"阅读数记录数量不匹配: read_counts_to_add={len(read_counts_to_add)}, articles_to_add={len(articles_to_add)}"
-        logger.error(error_msg)
-        raise ValueError(error_msg)
-
-    read_count_records = []
-    for article_id, count_tuple in zip(article_ids, read_counts_to_add):
-        if article_id is not None and count_tuple:
-            read_count_records.append((article_id, count_tuple[0]))
-    
-    if read_count_records:
-        add_read_counts_batch(read_count_records)
-    
-    # 更新结果中的article_id（确保成功結果與返回ID對齊）
-    article_idx = 0
-    for result in processed_results:
-        if result.get('success') and article_idx < len(article_ids):
-            result['data']['id'] = article_ids[article_idx]
-            article_idx += 1
-    
-    logger.info(f"批量插入成功: {len(articles_to_add)} 篇文章")
-    
-    return processed_results
+    """同步處理 URL 列表（委派給 article_service）"""
+    from .article_service import _process_urls_sync as svc_sync
+    return await svc_sync(urls)
 
 @app.route('/api/articles', methods=['POST'])
 def create_article():
@@ -644,46 +424,11 @@ def export_csv():
         
         if not article_ids:
             return jsonify({'success': False, 'error': '请选择要导出的文章'}), 400
-        
-        # 创建CSV文件在内存中
-        output = io.StringIO()
-        writer = csv.writer(output)
-        
-        # 写入BOM以支持Excel正确显示中文
-        output.write('\ufeff')
-        
-        # 写入表头
-        writer.writerow(['文章标题', '网站', 'URL', '阅读数', '记录时间'])
-        
-        # 优化：一次性获取所有文章，避免重复查询
-        all_articles = get_all_articles()
-        articles_dict = {a['id']: a for a in all_articles}
-        
-        # 获取每篇文章的数据
-        for article_id in article_ids:
-            article = articles_dict.get(article_id)
-            
-            if not article:
-                continue
-            
-            # 获取该文章的阅读数历史
-            history = get_read_counts(article_id, start_date=start_date, end_date=end_date)
-            
-            for record in history:
-                writer.writerow([
-                    article.get('title', 'N/A'),
-                    article.get('site', 'N/A'),
-                    article.get('url', 'N/A'),
-                    record['count'],
-                    record['timestamp']
-                ])
-        
-        # 准备下载
-        output.seek(0)
-        filename = f"article_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        
+
+        content, filename = export_selected_articles_csv(article_ids, start_date, end_date)
+
         return Response(
-            output.getvalue().encode('utf-8-sig'),
+            content,
             mimetype='text/csv',
             headers={
                 'Content-Disposition': f'attachment; filename={filename}',
@@ -702,39 +447,11 @@ def export_all_csv():
     try:
         start_date = request.args.get('start_date')
         end_date = request.args.get('end_date')
-        
-        # 创建CSV文件在内存中
-        output = io.StringIO()
-        writer = csv.writer(output)
-        
-        # 写入BOM以支持Excel正确显示中文
-        output.write('\ufeff')
-        
-        # 写入表头
-        writer.writerow(['文章标题', '网站', 'URL', '阅读数', '记录时间'])
-        
-        # 获取所有文章
-        articles = get_all_articles()
-        
-        for article in articles:
-            # 获取该文章的阅读数历史
-            history = get_read_counts(article['id'], start_date=start_date, end_date=end_date)
-            
-            for record in history:
-                writer.writerow([
-                    article.get('title', 'N/A'),
-                    article.get('site', 'N/A'),
-                    article.get('url', 'N/A'),
-                    record['count'],
-                    record['timestamp']
-                ])
-        
-        # 准备下载
-        output.seek(0)
-        filename = f"all_articles_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        
+
+        content, filename = export_all_articles_csv(start_date, end_date)
+
         return Response(
-            output.getvalue().encode('utf-8-sig'),
+            content,
             mimetype='text/csv',
             headers={
                 'Content-Disposition': f'attachment; filename={filename}',
@@ -751,174 +468,11 @@ def export_all_csv():
 def get_system_health():
     """获取系统健康状态"""
     try:
-        import psutil
-        import socket
-        import time
-        from datetime import datetime, timedelta
-        
-        # 1. 系统资源
-        # 首次调用 cpu_percent 会返回 0，所以这里只是获取当前瞬时状态
-        cpu_percent = psutil.cpu_percent(interval=None) 
-        memory = psutil.virtual_memory()
-        disk = psutil.disk_usage('.')
-        
-        system_status = {
-            'cpu': {
-                'percent': cpu_percent,
-                'count': psutil.cpu_count()
-            },
-            'memory': {
-                'total': memory.total,
-                'available': memory.available,
-                'percent': memory.percent
-            },
-            'disk': {
-                'total': disk.total,
-                'free': disk.free,
-                'percent': disk.percent
-            }
-        }
-        
-        # 2. 平台健康度
-        platforms = get_platform_health()
-        failures = get_platform_failures()
-        
-        # 按平台分组失败记录
-        failures_by_site = {}
-        for f in failures:
-            site = f['site'] or '其他'
-            if site not in failures_by_site:
-                failures_by_site[site] = []
-            # 只保留最近5条
-            if len(failures_by_site[site]) < 5:
-                failures_by_site[site].append({
-                    'id': f['id'],
-                    'title': f['title'] or f['url'],
-                    'url': f['url'],
-                    'error': f['last_error'],
-                    'time': f['last_crawl_time']
-                })
+        payload = get_system_health_payload()
 
-        crawl_interval = int(get_setting('crawl_interval_hours', str(CRAWL_INTERVAL_HOURS)))
-        
-        platform_status = []
-        now = datetime.now()
-        
-        for p in platforms:
-            site = p['site'] or '其他'
-            last_update = p['last_update']
-            article_count = p['article_count']
-            
-            status = 'ok'
-            msg = '正常'
-            site_failures = failures_by_site.get(site, [])
-            
-            if not last_update:
-                status = 'unknown'
-                msg = '无数据'
-                # 如果没有文章，也算是正常
-                if article_count == 0:
-                    status = 'ok'
-                    msg = '无文章'
-            else:
-                try:
-                    last_dt = datetime.strptime(last_update, '%Y-%m-%d %H:%M:%S')
-                    diff_hours = (now - last_dt).total_seconds() / 3600
-                    
-                    # 判断逻辑：
-                    # 警告：超过爬取间隔的 2 倍
-                    # 错误：超过爬取间隔的 4 倍
-                    if diff_hours > crawl_interval * 4:
-                        status = 'error'
-                        msg = f'严重延迟 ({int(diff_hours)}小时)'
-                    elif diff_hours > crawl_interval * 2:
-                        status = 'warning'
-                        msg = f'延迟 ({int(diff_hours)}小时)'
-                except (ValueError, TypeError) as e:
-                    logger.debug(f"解析時間格式失敗: {e}")
-                    status = 'unknown'
-                    msg = '时间格式错误'
-                except Exception as e:
-                    logger.warning(f"處理平台狀態時發生未知錯誤: {e}")
-                    status = 'unknown'
-                    msg = '时间格式错误'
-            
-            # 如果有失败记录，且状态目前是ok，则升级为warning
-            if site_failures and status == 'ok':
-                status = 'warning'
-                msg = f'有 {len(site_failures)} 篇失败'
-            elif site_failures:
-                 msg += f', {len(site_failures)} 篇失败'
-
-            platform_status.append({
-                'site': site,
-                'status': status,
-                'message': msg,
-                'last_update': last_update,
-                'article_count': article_count,
-                'failures': site_failures
-            })
-            
-        # 3. 网络连通性 (并发检查)
-        import concurrent.futures
-        
-        from .config import HEALTH_CHECK_TIMEOUT, MAX_HEALTH_CHECK_WORKERS
-        def check_conn(host, port=443):
-            try:
-                start = time.time()
-                socket.create_connection((host, port), timeout=HEALTH_CHECK_TIMEOUT)
-                return {'ok': True, 'latency': int((time.time() - start) * 1000)}
-            except (socket.error, OSError, TimeoutError) as e:
-                logger.debug(f"网络连接检查失败 {host}:{port}: {e}")  # 網絡檢查失敗是正常的，使用 debug
-                return {'ok': False, 'latency': 0}
-        
-        # 准备检查列表
-        targets = [('互联网连通性', 'www.baidu.com')]
-        for domain, name in SUPPORTED_SITES.items():
-            targets.append((name, domain))
-            
-        network_results = {}
-        
-        # 使用线程池并发检查，避免阻塞
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_HEALTH_CHECK_WORKERS) as executor:
-            future_to_target = {
-                executor.submit(check_conn, domain, 443): (name, domain) 
-                for name, domain in targets
-            }
-            
-            for future in concurrent.futures.as_completed(future_to_target):
-                name, domain = future_to_target[future]
-                try:
-                    result = future.result()
-                    network_results[domain] = {
-                        'name': name,
-                        'host': domain,
-                        'status': result
-                    }
-                except Exception as e:
-                    logger.debug(f"網絡檢查異常 {domain}: {e}")
-                    network_results[domain] = {
-                        'name': name,
-                        'host': domain,
-                        'status': {'ok': False, 'latency': 0}
-                    }
-        
-        # 排序：互联网连通性第一，其他按字母
-        sorted_network = []
-        if 'www.baidu.com' in network_results:
-             sorted_network.append(network_results.pop('www.baidu.com'))
-             
-        for domain in sorted(network_results.keys()):
-            sorted_network.append(network_results[domain])
-                
         return jsonify({
             'success': True,
-            'data': {
-                'system': system_status,
-                'platforms': platform_status,
-                'network': sorted_network,
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            }
+            'data': payload
         })
         
     except Exception as e:

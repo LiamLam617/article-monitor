@@ -679,10 +679,6 @@ async def extract_with_config_full(url: str, platform: str, crawler: Optional[As
                                 if result:
                                     return result
                         return None
-                    
-                        view_count = find_view_count(json_data)
-                    if view_count:
-                        return (view_count, article_title)
                 except:
                     pass
             

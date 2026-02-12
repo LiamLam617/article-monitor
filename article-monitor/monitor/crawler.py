@@ -15,7 +15,7 @@ from .database import (
     get_all_articles, add_read_count, get_latest_read_count,
     get_latest_read_counts_batch, update_article_title, update_article_status
 )
-from .extractors import extract_read_count, extract_article_info, create_shared_crawler
+from .extractors import extract_article_info, create_shared_crawler
 from urllib.parse import urlparse
 from .config import (
     SUPPORTED_SITES, CRAWL_CONCURRENCY, CRAWL_DELAY,
@@ -785,7 +785,11 @@ async def crawl_all_articles():
         logger.info(f"平均速度: {len(articles) / elapsed:.2f} 文章/秒")
 
 def crawl_all_sync():
-    """同步包装器"""
+    """同步包装器；若已有爬取在運行則跳過（防定時任務疊加）"""
+    progress = get_crawl_progress()
+    if progress.get('is_running'):
+        logger.info("爬取已在進行中，跳過本次定時觸發")
+        return
     try:
         asyncio.run(crawl_all_articles())
     except Exception as e:

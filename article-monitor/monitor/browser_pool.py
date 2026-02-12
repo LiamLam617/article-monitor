@@ -11,7 +11,7 @@ from collections import deque
 from datetime import datetime, timedelta
 from crawl4ai import AsyncWebCrawler
 from .extractors import get_browser_config, ensure_browser_config
-from .config import ANTI_SCRAPING_ENABLED, ANTI_SCRAPING_ROTATE_UA
+from .config import ANTI_SCRAPING_ENABLED, ANTI_SCRAPING_ROTATE_UA, BROWSER_POOL_MAX_SIZE, BROWSER_POOL_MIN_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +51,8 @@ class BrowserPool:
         self._pool_lock_by_loop: Dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
         self._pool: deque = deque()
         self._in_use: set = set()
-        self._max_size = 5  # 最大池大小
-        self._min_size = 2  # 最小池大小
+        self._max_size = BROWSER_POOL_MAX_SIZE  # 由 config 控制，低資源時 2
+        self._min_size = max(1, min(BROWSER_POOL_MIN_SIZE, BROWSER_POOL_MAX_SIZE))  # 最小池大小，不超過 max
         self._max_idle_time = 300  # 最大空闲时间（秒）
         self._last_cleanup = datetime.now()
         self._cleanup_interval = 60  # 清理间隔（秒）

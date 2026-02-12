@@ -11,13 +11,19 @@ DATABASE_PATH = os.path.join(BASE_DIR, '..', 'data', 'monitor.db')
 # 可選調試日誌路徑（主要供開發除錯使用）
 DEBUG_LOG_PATH = os.getenv('ARTICLE_MONITOR_DEBUG_LOG') or None
 
+# ==================== 資源配置（2C2G 低資源模式） ====================
+# RESOURCE_PROFILE=low 或 LOW_MEMORY=1 時啟用 2 核 2GB 友善預設（並發、池大小、SQLite、線程數等）
+_RESOURCE_PROFILE = (os.getenv('RESOURCE_PROFILE', '').strip().lower() == 'low' or
+                    os.getenv('LOW_MEMORY', '').strip() in ('1', 'true', 'yes'))
+
 # 爬取配置（支持环境变量）
 CRAWL_INTERVAL_HOURS = int(os.getenv('CRAWL_INTERVAL_HOURS', '6'))  # 每6小时爬取一次
 CRAWL_TIMEOUT = int(os.getenv('CRAWL_TIMEOUT', '60'))  # 60秒超时
 
 # 爬取并发数（同时爬取的文章数量，建议3-10之间）
-# 优化：根据平台数量动态调整，但不超过10
-CRAWL_CONCURRENCY = min(int(os.getenv('CRAWL_CONCURRENCY', '5')), 10)
+# 低資源時預設 2，否則 5；不超過 10
+_CRAWL_CONCURRENCY_DEFAULT = '2' if _RESOURCE_PROFILE else '5'
+CRAWL_CONCURRENCY = min(int(os.getenv('CRAWL_CONCURRENCY', _CRAWL_CONCURRENCY_DEFAULT)), 10)
 
 # 爬取延迟（秒，每个请求之间的延迟，0表示无延迟，建议0.5-1秒）
 CRAWL_DELAY = float(os.getenv('CRAWL_DELAY', '1'))
@@ -116,7 +122,8 @@ CSV_EXPORT_BATCH_SIZE = 100  # CSV 導出批次大小
 
 # 任務管理器相關
 TASK_QUEUE_TIMEOUT = 5.0  # 任務隊列超時時間（秒）
-MAX_CONCURRENT_TASKS = 3  # 最大並發任務數
+_MAX_CONCURRENT_TASKS_DEFAULT = 2 if _RESOURCE_PROFILE else 3
+MAX_CONCURRENT_TASKS = int(os.getenv('MAX_CONCURRENT_TASKS', str(_MAX_CONCURRENT_TASKS_DEFAULT)))
 
 # 批量處理相關
 BATCH_PROCESS_SIZE = 10  # 批量處理 URL 的批次大小
@@ -124,7 +131,18 @@ BATCH_PROCESS_CONCURRENCY = 5  # 批量處理的並發數
 
 # 健康檢查相關
 HEALTH_CHECK_TIMEOUT = 3  # 健康檢查超時時間（秒）
-MAX_HEALTH_CHECK_WORKERS = 20  # 健康檢查最大工作線程數
+_MAX_HEALTH_CHECK_WORKERS_DEFAULT = 4 if _RESOURCE_PROFILE else 20
+MAX_HEALTH_CHECK_WORKERS = int(os.getenv('MAX_HEALTH_CHECK_WORKERS', str(_MAX_HEALTH_CHECK_WORKERS_DEFAULT)))
+
+# 瀏覽器池（低資源時 max=2, min=1，與 CRAWL_CONCURRENCY=2 搭配）
+_BROWSER_POOL_MAX_DEFAULT = 2 if _RESOURCE_PROFILE else 5
+_BROWSER_POOL_MIN_DEFAULT = 1 if _RESOURCE_PROFILE else 2
+BROWSER_POOL_MAX_SIZE = int(os.getenv('BROWSER_POOL_MAX_SIZE', str(_BROWSER_POOL_MAX_DEFAULT)))
+BROWSER_POOL_MIN_SIZE = int(os.getenv('BROWSER_POOL_MIN_SIZE', str(_BROWSER_POOL_MIN_DEFAULT)))
+
+# SQLite 每連接 cache 大小（KB）。低資源時 2MB，否則 64MB。PRAGMA cache_size 使用負值表示頁數（約 1 頁=1KB）
+_SQLITE_CACHE_KB_DEFAULT = 2048 if _RESOURCE_PROFILE else 65536
+SQLITE_CACHE_SIZE_KB = int(os.getenv('SQLITE_CACHE_SIZE_KB', str(_SQLITE_CACHE_KB_DEFAULT)))
 
 # ==================== 飞书 Bitable 配置 ====================
 FEISHU_APP_ID = os.getenv('FEISHU_APP_ID', '').strip()

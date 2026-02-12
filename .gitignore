@@ -14,3 +14,4 @@ article-monitor/tests
 article-monitor/.coveragerc
 .claude
 article-monitor/scripts/install_venv.ps1
+.reports

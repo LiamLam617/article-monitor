@@ -1,17 +1,17 @@
+# 文章閱讀數監測 - Docker Compose
+# 預設 2 核 2GB 低資源配置；主機 ≥3GB 時可提高 memory、shm_size 並取消 RESOURCE_PROFILE=low
+# 可選：建立 .env（可從 .env.example 複製）後取消下方 env_file 註解，以覆蓋環境變數
 services:
   article-monitor:
     build:
       context: .
       dockerfile: Dockerfile
+    image: article-monitor:latest
     container_name: article-monitor
-    
-    # 关键优化 1: 增加共享内存大小
-    # Chromium/Playwright 非常依赖 /dev/shm。Docker 默认只有 64MB，
-    # 这会导致浏览器频繁崩溃 (Crash)。设置为 1gb 或 2gb 可解决此问题。
-    shm_size: '2gb'
 
-    # 关键优化 2: 启用 init 进程
-    # 转发信号并清理僵尸进程，这对于包含多进程(如浏览器)的容器非常重要
+    # Chromium/Playwright 依賴 /dev/shm，預設 64MB 易崩潰；2C2G 用 1gb，主機充足可改 2gb
+    shm_size: '1gb'
+    # 轉發信號、清理殭屍進程（多進程/瀏覽器必需）
     init: true
 
     ports:
@@ -20,20 +20,20 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      # 挂载时区文件，确保容器时间与宿主机完全同步
       - /etc/localtime:/etc/localtime:ro
 
+    # env_file: .env   # 有 .env 時取消註解，可覆蓋下方環境變數
     environment:
       - TZ=Asia/Shanghai
-      # Playwright 配置（確保瀏覽器路徑一致）
       - PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright
-      # Flask 配置
       - FLASK_HOST=0.0.0.0
       - FLASK_PORT=5000
       - FLASK_DEBUG=false
-      # 爬取配置
+      # 2C2G 低資源模式（並發 2、瀏覽器池 2、SQLite 2MB、健康檢查 4 線程）。主機 ≥3GB 可改為 RESOURCE_PROFILE= 或註解此行
+      - RESOURCE_PROFILE=low
+      # 爬取配置（RESOURCE_PROFILE=low 時 CRAWL_CONCURRENCY 預設為 2，可覆寫）
       - CRAWL_INTERVAL_HOURS=6
-      - CRAWL_CONCURRENCY=3
+      - CRAWL_CONCURRENCY=2
       - CRAWL_DELAY=1.0
       - CRAWL_MAX_RETRIES=10
       - CRAWL_RETRY_DELAY=2.0
@@ -50,8 +50,6 @@ services:
     
     restart: unless-stopped
 
-    # 关键优化 3: 日志轮转
-    # 防止容器日志无限制增长占满磁盘
     logging:
       driver: "json-file"
       options:
@@ -65,11 +63,11 @@ services:
       retries: 3
       start_period: 40s
 
-    # 资源限制（根据服务器配置调整）
+    # 預設 2 核 2GB；主機 ≥3GB 可改 memory: 3072M、關閉 RESOURCE_PROFILE=low
     deploy:
       resources:
         limits:
           cpus: '2.0'
-          memory: 3072M
+          memory: 2g
         reservations:
-          memory: 1024M
+          memory: 512M

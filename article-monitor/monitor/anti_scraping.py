@@ -12,8 +12,6 @@
 - 行为层：随机延迟、鼠标移动模拟
 """
 import random
-import time
-import math
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import logging

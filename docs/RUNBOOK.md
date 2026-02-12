@@ -19,7 +19,22 @@
 
 ## 部署流程
 
-以下以單機或簡單伺服器部署為例：
+### 方式一：Docker（推薦）
+
+預設為 2 核 2GB 低資源配置；主機記憶體 ≥3GB 時可在 `docker-compose.yml` 中提高 `memory`、`shm_size` 並取消 `RESOURCE_PROFILE=low`。
+
+1. **建置與啟動**
+   ```bash
+   cd article-monitor
+   docker compose up -d --build
+   ```
+2. **埠與卷**
+   - 服務埠：5000（可於 `docker-compose.yml` 的 `ports` 修改）
+   - 資料與日誌：`./data`、`./logs` 掛載至容器
+3. **環境變數**
+   - 在 `docker-compose.yml` 的 `environment` 調整，或建立 `.env` 並在 compose 中取消 `env_file: .env` 註解（見 `.env.example`）。
+
+### 方式二：單機 / 虛擬環境
 
 1. **準備環境**
    - 安裝 Python 3.11+
@@ -33,9 +48,10 @@
    source .venv/bin/activate  # Linux/macOS
    # Windows 可使用 .venv\Scripts\activate
    pip install -r requirements.txt
+   python -m playwright install chromium
    ```
 4. **設定環境變數**
-   - 可複製 `article-monitor/.env.example` 為 `.env` 並填寫；或使用 systemd / docker-compose / shell 設定：
+   - 可複製 `article-monitor/.env.example` 為 `.env` 並填寫；或使用 systemd / supervisor / shell 設定：
      - `FLASK_HOST`、`FLASK_PORT`
      - `CRAWL_INTERVAL_HOURS` 等爬蟲設定
      - `ALLOWED_PLATFORMS` 控制允許的平台
@@ -47,7 +63,7 @@
      cd article-monitor
      python run_monitor.py
      ```
-   - 建議以 process manager 管理（systemd / supervisor / docker 等）。
+   - 建議以 process manager 管理（systemd / supervisor 等）。
 
 ## 監控與健康檢查
 

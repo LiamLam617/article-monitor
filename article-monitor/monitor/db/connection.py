@@ -2,7 +2,7 @@ import os
 import sqlite3
 import logging
 
-from ..config import DATABASE_PATH
+from ..config import DATABASE_PATH, SQLITE_CACHE_SIZE_KB
 
 
 logger = logging.getLogger(__name__)
@@ -15,7 +15,8 @@ def _apply_db_optimizations(conn: sqlite3.Connection) -> None:
     """应用数据库性能优化设置（每次新连接都需要设置）"""
     conn.execute('PRAGMA journal_mode=WAL')
     conn.execute('PRAGMA synchronous=NORMAL')
-    conn.execute('PRAGMA cache_size=-64000')
+    # 負值表示頁數（約 1 頁=1KB），由 config 控制；低資源時 2MB 減少記憶體
+    conn.execute(f'PRAGMA cache_size=-{SQLITE_CACHE_SIZE_KB}')
     conn.execute('PRAGMA temp_store=MEMORY')
     conn.execute('PRAGMA foreign_keys=ON')
 

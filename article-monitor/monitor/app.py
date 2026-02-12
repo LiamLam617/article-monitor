@@ -1,13 +1,10 @@
 """
 Flask应用 - 简单的RESTful API和前端
 """
-from flask import Flask, render_template, request, jsonify, Response, send_file
+from flask import Flask, render_template, request, jsonify, Response
 from flask_cors import CORS
 import asyncio
-import csv
-import io
 import time
-from datetime import datetime
 from typing import List, Optional
 from .database import (
     init_db, add_article, get_all_articles, get_all_articles_with_latest_count,
@@ -20,7 +17,7 @@ import logging
 logger = logging.getLogger(__name__)
 from .scheduler import start_scheduler
 from .config import (
-    FLASK_HOST, FLASK_PORT, FLASK_DEBUG, SUPPORTED_SITES, CRAWL_INTERVAL_HOURS,
+    FLASK_HOST, FLASK_PORT, FLASK_DEBUG, CRAWL_INTERVAL_HOURS,
     is_platform_allowed,
 )
 

@@ -207,7 +207,10 @@ def batch_update_bitable_records(
                 "client.bitable.v1.app_table_record.batch_update failed, code=%s, msg=%s",
                 resp.code, resp.msg,
             )
-            raise RuntimeError(f"Bitable 批量更新记录失败: {resp.msg}")
+            msg = f"Bitable 批量更新记录失败: {resp.msg}"
+            if resp.code == 91403:
+                msg += "（91403 Forbidden：请确认飞书应用已获得该多维表格的「可编辑」权限，并在应用后台开通 bitable:app 写权限）"
+            raise RuntimeError(msg)
 
 
 def truncate_error_message(message: str, max_len: Optional[int] = None) -> str:

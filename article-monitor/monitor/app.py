@@ -472,9 +472,46 @@ def export_all_csv():
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+async def _run_bitable_sync_async(
+    task_id: str,
+    *,
+    app_token: Optional[str] = None,
+    table_id: Optional[str] = None,
+    field_url: Optional[str] = None,
+    field_total_read: Optional[str] = None,
+    field_read_24h: Optional[str] = None,
+    field_read_72h: Optional[str] = None,
+    field_error: Optional[str] = None,
+):
+    """后台执行 Bitable 同步，结果写入任务 progress。"""
+    from .task_manager import get_task_manager
+    from .bitable_sync import sync_from_bitable
+
+    result = await asyncio.to_thread(
+        sync_from_bitable,
+        app_token=app_token,
+        table_id=table_id,
+        field_url=field_url,
+        field_total_read=field_total_read,
+        field_read_24h=field_read_24h,
+        field_read_72h=field_read_72h,
+        field_error=field_error,
+    )
+    progress = {
+        'success': result.get('success', False),
+        'processed': result.get('processed', 0),
+        'updated': result.get('updated', 0),
+        'failed': result.get('failed', 0),
+        'errors': result.get('errors', []),
+    }
+    if result.get('message'):
+        progress['message'] = result['message']
+    get_task_manager().update_task_progress(task_id, progress)
+
+
 @app.route('/api/bitable/sync', methods=['POST'])
 def bitable_sync():
-    """从飞书 Bitable 拉取发布链接 → 爬取 → 写回总阅读量/失败原因。"""
+    """从飞书 Bitable 拉取发布链接 → 爬取 → 写回。异步执行，立即返回 202 + task_id，通过 GET /api/tasks/<task_id> 轮询结果。"""
     global _last_bitable_sync_time
     try:
         now = time.time()
@@ -486,56 +523,34 @@ def bitable_sync():
         _last_bitable_sync_time = now
 
         data = request.json or {}
-        app_token = (data.get('app_token') or '').strip()
-        table_id = (data.get('table_id') or '').strip()
+        app_token = (data.get('app_token') or '').strip() or None
+        table_id = (data.get('table_id') or '').strip() or None
         field_url = data.get('field_url')
         field_total_read = data.get('field_total_read')
         field_read_24h = data.get('field_read_24h')
         field_read_72h = data.get('field_read_72h')
         field_error = data.get('field_error')
 
-        result = None
-        try:
-            from .bitable_sync import sync_from_bitable
-            result = sync_from_bitable(
-                app_token=app_token or None,
-                table_id=table_id or None,
-                field_url=field_url,
-                field_total_read=field_total_read,
-                field_read_24h=field_read_24h,
-                field_read_72h=field_read_72h,
-                field_error=field_error,
-            )
-        except Exception as e:
-            logger.exception("Bitable 同步异常")
-            return jsonify({
-                'success': False,
-                'error': '同步处理失败，请稍后重试',
-                'processed': 0,
-                'updated': 0,
-                'failed': 0,
-                'errors': [],
-            }), 500
-
-        if not result.get('success') and result.get('message'):
-            return jsonify({
-                'success': False,
-                'error': result.get('message'),
-                'processed': result.get('processed', 0),
-                'updated': result.get('updated', 0),
-                'failed': result.get('failed', 0),
-                'errors': result.get('errors', []),
-            }), 400
-
+        from .task_manager import get_task_manager
+        task_id = get_task_manager().submit_task(
+            _run_bitable_sync_async,
+            app_token=app_token,
+            table_id=table_id,
+            field_url=field_url,
+            field_total_read=field_total_read,
+            field_read_24h=field_read_24h,
+            field_read_72h=field_read_72h,
+            field_error=field_error,
+        )
         return jsonify({
             'success': True,
             'data': {
-                'processed': result.get('processed', 0),
-                'updated': result.get('updated', 0),
-                'failed': result.get('failed', 0),
-                'errors': result.get('errors', []),
-            }
-        })
+                'task_id': task_id,
+                'status': 'pending',
+                'message': '同步已提交，请通过 status_url 轮询结果',
+            },
+            'status_url': f'/api/tasks/{task_id}',
+        }), 202
     except Exception as e:
         logger.exception("Bitable sync 请求处理异常")
         return jsonify({'success': False, 'error': '服务器内部错误，请稍后重试'}), 500

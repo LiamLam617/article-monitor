@@ -77,6 +77,7 @@ Article Monitor API 提供了一套完整的 RESTful API，用於管理文章監
 ### HTTP 狀態碼
 
 - `200 OK` - 請求成功
+- `202 Accepted` - 已接受並將非同步處理（如 Bitable 同步）
 - `400 Bad Request` - 請求參數錯誤
 - `404 Not Found` - 資源不存在
 - `429 Too Many Requests` - 請求過於頻繁（如 Bitable 同步限流）
@@ -629,7 +630,8 @@ GET /api/export/all-csv?start_date=2025-12-01&end_date=2025-12-09
 
 **端點**: `POST /api/bitable/sync`
 
-**描述**: 從飛書多維表格（Bitable）讀取「發布連結」列中的 URL，依序爬取各文章閱讀數，並將總閱讀量、24 小時 / 72 小時閱讀量及失敗原因寫回對應列。未傳的 `app_token` / `table_id` 時使用環境變數 `FEISHU_BITABLE_APP_TOKEN`、`FEISHU_BITABLE_TABLE_ID`；飛書自建應用需設定 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`（用於取得 [tenant_access_token](https://open.feishu.cn/document/server-docs/authentication-management/access-token/tenant_access_token_internal)）。
+**描述**: 從飛書多維表格（Bitable）讀取「發布連結」列中的 URL，依序爬取各文章閱讀數，並將總閱讀量、24 小時 / 72 小時閱讀量及失敗原因寫回對應列。未傳的 `app_token` / `table_id` 時使用環境變數 `FEISHU_BITABLE_APP_TOKEN`、`FEISHU_BITABLE_TABLE_ID`；飛書自建應用需設定 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`（用於取得 [tenant_access_token](https://open.feishu.cn/document/server-docs/authentication-management/access-token/tenant_access_token_internal)）。  
+**異步**：同步為後台執行，為避免 Cloudflare / 代理超時，本介面立即回傳 **202 Accepted** 與 `task_id`，請以 **GET /api/tasks/<task_id>** 輪詢狀態與結果（見下方「輪詢任務結果」）。
 
 **限流**: 全局限流，同一服務 60 秒內僅允許呼叫一次；過快回傳 `429`。
 
@@ -656,31 +658,38 @@ GET /api/export/all-csv?start_date=2025-12-01&end_date=2025-12-09
 - `field_read_72h` (string, 可選) - 72 小時閱讀量列名，預設「72小时总阅读量」
 - `field_error` (string, 可選) - 失敗原因列名，預設「失败原因」
 
-**成功響應** (200):
+**成功響應** (202 Accepted):
 
 ```json
 {
   "success": true,
   "data": {
-    "processed": 10,
-    "updated": 8,
-    "failed": 2,
-    "errors": [
-      { "record_id": "recxxx", "url": "https://...", "error": "无效的URL格式" }
-    ]
-  }
+    "task_id": "uuid",
+    "status": "pending",
+    "message": "同步已提交，请通过 status_url 轮询结果"
+  },
+  "status_url": "/api/tasks/<task_id>"
 }
 ```
 
-- `processed`: 處理的記錄數
-- `updated`: 成功寫回閱讀量的記錄數
-- `failed`: 爬取或寫入失敗的記錄數
-- `errors`: 失敗明細（含 `record_id`、`url`、`error`）
+**輪詢任務結果**：使用 **GET /api/tasks/<task_id>**（即回傳的 `status_url`）。  
+- `data.status`：`pending` → `running` → `completed` 或 `failed`  
+- 當 `data.status === 'completed'` 時，`data.progress` 即為同步結果：
+  - `progress.success` (boolean)：業務是否成功（如缺少飛書設定則為 false）
+  - `progress.processed` / `progress.updated` / `progress.failed`：處理／成功／失敗筆數
+  - `progress.errors`：失敗明細 `[{ "record_id", "url", "error" }]`
+  - `progress.message`（可選）：業務錯誤說明（如「未配置 FEISHU_APP_ID 或 FEISHU_APP_SECRET」）  
+- 當 `data.status === 'failed'` 時，`data.error` 為伺服器異常訊息。
 
 **錯誤響應**:
-- **400** - 同步邏輯失敗（如缺少 app_token/table_id 或飛書設定），body 含 `success: false`、`error`、`processed`、`updated`、`failed`、`errors`
 - **429** - 請求過於頻繁，body 含 `success: false`、`error`: `"请求过于频繁，请稍后再试"`
-- **500** - 服務端異常，body 含 `success: false`、`error`: 通用錯誤訊息（詳細錯誤僅記錄於服務端日誌）
+- **500** - 伺服器異常，body 含 `success: false`、`error`: 通用錯誤訊息（詳細錯誤僅記錄於服務端日誌）
+
+**觸發方式**（可選其一或錯開時間）:
+- **飞书定時 POST**：飞书自動化定時呼叫本介面，收到 202 即成功提交。
+- **應用內定時**：設定環境變數 `BITABLE_SYNC_SCHEDULE_ENABLED=True`、`BITABLE_SYNC_SCHEDULE_HOURS=24`（每 24 小時一次），由應用內排程提交同步任務（使用環境變數 `FEISHU_BITABLE_APP_TOKEN`、`FEISHU_BITABLE_TABLE_ID`）。
+
+**排錯**：若輪詢結果為寫回失敗且錯誤含 **91403 Forbidden**，表示飞书應用對該多維表格無寫入權限。請在飞书開放平台為應用開通「多维表格」寫權限（bitable:app），並在對應多維表格中將該應用或協作者設為「可編輯」。
 
 ---
 

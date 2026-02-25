@@ -1,0 +1,9 @@
+[run]
+source = monitor
+# extractors: browser-dependent crawl logic (no real browser in tests)
+# anti_scraping: UA/stealth logic; covered indirectly via config and extractors
+omit = */tests/*, monitor/extractors.py, monitor/anti_scraping.py
+
+[report]
+fail_under = 80
+show_missing = True

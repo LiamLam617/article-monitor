@@ -20,9 +20,13 @@ def test_get_interval_hours_invalid_falls_back_to_default(monkeypatch):
 
 def test_get_interval_hours_default_when_missing(monkeypatch):
     """get_interval_hours uses default when get_setting returns default."""
-    monkeypatch.setattr(scheduler_module, "get_setting", lambda k, default=None: default)
-    default = scheduler_module.CRAWL_INTERVAL_HOURS
-    assert get_interval_hours() == default
+    expected = scheduler_module.CRAWL_INTERVAL_HOURS
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_setting",
+        lambda k, default=None: str(expected),
+    )
+    assert get_interval_hours() == expected
 
 
 def test_start_scheduler_adds_job(monkeypatch):

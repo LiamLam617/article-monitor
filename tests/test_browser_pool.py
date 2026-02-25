@@ -35,7 +35,7 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def test_get_browser_pool_singleton():
+def test_get_browser_pool_singleton(mock_create_crawler):
     """get_browser_pool returns the same instance."""
     a = get_browser_pool()
     b = get_browser_pool()

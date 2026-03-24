@@ -218,6 +218,21 @@
             background: #f8d7da;
             border-radius: 4px;
         }
+
+        .system-tasks-panel {
+            background: white;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 16px;
+        }
+
+        .system-task-item {
+            border: 1px solid #eee;
+            border-radius: 6px;
+            padding: 10px;
+            margin-top: 10px;
+        }
         
         /* 失败列表样式 */
         .failures-panel {
@@ -1174,7 +1189,7 @@
                 <span class="settings-hint">（当前：每 <span id="currentInterval">6</span> 小时自动爬取一次）</span>
             </div>
         </div>
-        
+
         <div class="progress-panel" id="progressPanel">
             <div class="settings-title">🔄 爬取进度</div>
             <div class="progress-bar-container">
@@ -1338,6 +1353,15 @@
                         <div class="loading">加载中...</div>
                     </div>
                 </div>
+
+                <!-- 系统执行中任务 -->
+                <div class="monitor-card full-width">
+                    <div class="task-header" style="margin-bottom: 0;">
+                        <span class="task-title">🖥️ 系统正在执行</span>
+                        <button class="btn-small secondary" onclick="loadRunningTasks()">刷新</button>
+                    </div>
+                    <div id="runningTasksList" class="task-details">切换到监控页后自动加载...</div>
+                </div>
             </div>
         </div>
         
@@ -1347,6 +1371,17 @@
                 <div style="display: flex; gap: 10px;">
                     <button onclick="addArticle()">批量添加文章</button>
                     <button class="secondary" id="crawlBtn" onclick="manualCrawl()">手动爬取</button>
+                </div>
+            </div>
+            <div class="cache-panel">
+                <div style="font-weight: 600; margin-bottom: 10px; color: #333;">飞书 Bitable 同步</div>
+                <div class="form-group">
+                    <input type="text" id="bitableAppToken" placeholder="app_token（可留空，使用环境变量）">
+                    <input type="text" id="bitableTableId" placeholder="table_id（可留空，使用环境变量）">
+                    <button id="bitableSyncBtn" onclick="syncBitable()">开始同步</button>
+                </div>
+                <div class="settings-hint">
+                    提交后会后台执行，请在下方任务面板查看实时进度条。
                 </div>
             </div>
             <div id="errorMsg"></div>
@@ -1401,6 +1436,7 @@
         let selectedArticles = new Set(); // 选中的文章ID集合
         let articleHistories = {}; // 文章历史数据缓存
         let progressInterval = null; // 进度轮询定时器
+        let runningTasksInterval = null; // 系统任务轮询定时器
         let currentTab = 'trend'; // 当前标签页
         let allArticles = []; // 所有文章数据
         
@@ -1454,11 +1490,13 @@
                 if (!monitorInterval) {
                     monitorInterval = setInterval(loadMonitorData, 5000);
                 }
-            } else if (tabName === 'failures') {
-                loadFailures();
-                if (!failuresInterval) {
-                    failuresInterval = setInterval(loadFailures, 10000); // 每10秒刷新一次
+                loadRunningTasks();
+                if (!runningTasksInterval) {
+                    runningTasksInterval = setInterval(loadRunningTasks, 2000);
                 }
+            } else if (tabName === 'failures') {
+                // 仅在进入失败列表页时按需加载，避免后台高频请求 /api/failures
+                loadFailures();
             }
             
             // 如果离开监控页，停止轮询
@@ -1466,12 +1504,12 @@
                 clearInterval(monitorInterval);
                 monitorInterval = null;
             }
-            
-            // 如果离开失败列表页，停止轮询
-            if (tabName !== 'failures' && failuresInterval) {
-                clearInterval(failuresInterval);
-                failuresInterval = null;
+            if (tabName !== 'monitor' && runningTasksInterval) {
+                clearInterval(runningTasksInterval);
+                runningTasksInterval = null;
             }
+            
+            // 失败列表改为按需加载，不再轮询
         }
         
         // 更新数据卡片
@@ -1767,6 +1805,53 @@
                 btn.disabled = false;
             }
         }
+
+        // 触发 Bitable 同步
+        async function syncBitable() {
+            const btn = document.getElementById('bitableSyncBtn');
+            const originalText = btn.innerText;
+            btn.disabled = true;
+            btn.innerText = '提交中...';
+
+            try {
+                const appToken = document.getElementById('bitableAppToken').value.trim();
+                const tableId = document.getElementById('bitableTableId').value.trim();
+                const payload = {};
+                if (appToken) payload.app_token = appToken;
+                if (tableId) payload.table_id = tableId;
+
+                const response = await fetch('/api/bitable/sync', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload),
+                });
+
+                const result = await response.json();
+                if (!response.ok || !result.success) {
+                    showError('Bitable 同步提交失败: ' + (result.error || '未知错误'));
+                    return;
+                }
+
+                const taskId = result.data?.task_id;
+                if (!taskId) {
+                    showError('Bitable 同步提交失败: 未返回 task_id');
+                    return;
+                }
+
+                const sourceInfo = [];
+                if (tableId) sourceInfo.push(`table_id=${tableId}`);
+                if (appToken) sourceInfo.push(`app_token=***${appToken.slice(-4)}`);
+                const sourceText = sourceInfo.length ? `（${sourceInfo.join(', ')}）` : '';
+                showTaskPanel(taskId, `Bitable 同步已提交${sourceText}`);
+                startTaskPolling(taskId);
+                showSuccess('Bitable 同步任务已提交');
+            } catch (error) {
+                showError('Bitable 同步提交失败: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = originalText;
+            }
+        }
         
         // 显示任务状态面板
         function showTaskPanel(taskId, message) {
@@ -1795,6 +1880,55 @@
             `;
             
             panel.style.display = 'block';
+        }
+
+        function renderRunningTasks(tasks) {
+            const container = document.getElementById('runningTasksList');
+            if (!container) return;
+            if (!tasks || tasks.length === 0) {
+                container.innerHTML = '<div style="color:#999;">当前无执行中任务</div>';
+                return;
+            }
+
+            const statusLabel = {
+                pending: '⏳ 等待中',
+                running: '🔄 执行中',
+            };
+
+            container.innerHTML = tasks.map((task) => {
+                const progress = task.progress || {};
+                const batch = progress.batch_url_progress || progress.url_progress || {};
+                const processed = batch.processed || 0;
+                const total = batch.total || 0;
+                const percent = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0;
+                const source = progress.source && progress.source.table_id ? ` | 来源: ${progress.source.table_id}` : '';
+                const stage = progress.stage ? ` | 阶段: ${progress.stage}` : '';
+
+                return `
+                    <div class="system-task-item">
+                        <div><strong>${task.id}</strong></div>
+                        <div style="font-size:12px;color:#666;margin-top:4px;">
+                            ${statusLabel[task.status] || task.status}${stage}${source}
+                        </div>
+                        <div class="task-progress" style="margin-top:8px;">
+                            <div class="task-progress-bar" style="width:${percent}%"></div>
+                        </div>
+                        <div style="font-size:12px;color:#666;">URL进度: ${processed}/${total}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function loadRunningTasks() {
+            try {
+                const response = await fetch('/api/tasks/running');
+                const result = await response.json();
+                if (result.success) {
+                    renderRunningTasks(result.data || []);
+                }
+            } catch (error) {
+                console.error('加载系统任务失败:', error);
+            }
         }
         
         // 开始轮询任务状态
@@ -1857,24 +1991,54 @@
             
             statusEl.textContent = statusText[taskData.status] || taskData.status;
             
-            // 更新进度条
-            if (taskData.progress && taskData.progress.total) {
-                const progress = (taskData.progress.processed / taskData.progress.total) * 100;
-                progressBarEl.style.width = `${progress}%`;
-                
-                // 更新详细信息
+            const progress = taskData.progress || {};
+            const batchProgress = progress.batch_url_progress || progress.url_progress || null;
+
+            // 更新进度条与详情（兼容文章批量任务 + Bitable 同步任务）
+            if (batchProgress && batchProgress.total > 0) {
+                const percent = Math.min(100, Math.round((batchProgress.processed / batchProgress.total) * 100));
+                progressBarEl.style.width = `${percent}%`;
+
+                const stage = progress.stage || taskData.status;
+                const stageLabelMap = {
+                    queued: '排队中',
+                    crawling: '爬取中',
+                    completed: '已完成',
+                };
+                const stageLabel = stageLabelMap[stage] || stage;
+                const sourceText = progress.source && progress.source.table_id
+                    ? `<span>来源: ${progress.source.table_id}</span>`
+                    : '';
+
                 detailsEl.innerHTML = `
                     <div class="task-stats">
-                        <span>已处理: ${taskData.progress.processed || 0} / ${taskData.progress.total}</span>
-                        <span>成功: ${taskData.progress.success || 0}</span>
-                        <span>失败: ${taskData.progress.failed || 0}</span>
+                        <span>阶段: ${stageLabel}</span>
+                        <span>URL进度: ${batchProgress.processed || 0} / ${batchProgress.total || 0}</span>
+                        <span>成功: ${progress.updated || progress.success || 0}</span>
+                        <span>失败: ${progress.failed || 0}</span>
+                        ${sourceText}
                     </div>
                 `;
+            } else if (progress.total) {
+                const percent = Math.min(100, Math.round((progress.processed / progress.total) * 100));
+                progressBarEl.style.width = `${percent}%`;
+                detailsEl.innerHTML = `
+                    <div class="task-stats">
+                        <span>已处理: ${progress.processed || 0} / ${progress.total}</span>
+                        <span>成功: ${progress.success || 0}</span>
+                        <span>失败: ${progress.failed || 0}</span>
+                    </div>
+                `;
+            } else if (['completed', 'failed', 'cancelled'].includes(taskData.status)) {
+                progressBarEl.style.width = taskData.status === 'completed' ? '100%' : '0%';
             }
             
             // 显示错误信息
             if (taskData.error) {
                 detailsEl.innerHTML += `<div class="task-error">错误: ${taskData.error}</div>`;
+            }
+            if (progress.message) {
+                detailsEl.innerHTML += `<div class="task-error">消息: ${progress.message}</div>`;
             }
         }
         
@@ -1892,8 +2056,7 @@
             }
         }
         
-        // 失败列表相关变量
-        let failuresInterval = null;
+        // 失败列表改为按需加载（进入页面/筛选变更/手动刷新时触发）
         
         async function loadFailures() {
             try {
@@ -3097,6 +3260,7 @@
             
             // 更新数据卡片
             updateDataCards();
+
         }
         
         // 确保DOM加载后再初始化

@@ -2,11 +2,8 @@
 import asyncio
 import time
 
-import pytest
-
 from monitor.task_manager import (
     get_task_manager,
-    TaskManager,
     TaskStatus,
 )
 

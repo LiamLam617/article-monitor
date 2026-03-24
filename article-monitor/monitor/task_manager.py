@@ -190,6 +190,22 @@ class TaskManager:
             task = self._tasks.get(task_id)
             if task:
                 task['progress'].update(progress)
+
+    def get_active_tasks(self) -> List[Dict]:
+        """获取系统中正在执行/等待的任务列表。"""
+        with self._task_lock:
+            out: List[Dict] = []
+            for task in self._tasks.values():
+                if task['status'] not in (TaskStatus.PENDING, TaskStatus.RUNNING):
+                    continue
+                out.append({
+                    'id': task['id'],
+                    'status': task['status'].value,
+                    'start_time': task['start_time'],
+                    'progress': dict(task.get('progress', {})),
+                    'error': task.get('error'),
+                })
+            return out
     
     def cancel_task(self, task_id: str) -> bool:
         """取消任务"""

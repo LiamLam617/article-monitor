@@ -4,6 +4,7 @@ crawl4ai
 apscheduler
 psutil
 lark-oapi>=1.2.0
+python-dotenv>=1.0.1
 
 # 测试依赖
 pytest>=7.4.0

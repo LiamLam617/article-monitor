@@ -64,7 +64,14 @@ def test_create_article_rejects_empty_url():
 
 
 def test_create_article_rejects_platform_not_allowed(monkeypatch):
-    monkeypatch.setattr(app_module, "is_platform_allowed", lambda site: False)
+    async def fake_crawl_single(url):
+        return {
+            "url": url,
+            "success": False,
+            "error": '平台 "juejin" 不在允许列表中，已跳过',
+            "error_code": "platform_not_allowed",
+        }
+    monkeypatch.setattr(app_module, "crawl_single_url_for_result", fake_crawl_single)
     client = app.test_client()
     resp = client.post(
         "/api/articles",
@@ -76,18 +83,34 @@ def test_create_article_rejects_platform_not_allowed(monkeypatch):
     assert "不在允许列表中" in data["error"]
 
 
+def test_create_article_crawl_failure_still_creates(monkeypatch):
+    async def fake_crawl_single(url):
+        return {
+            "url": url,
+            "success": False,
+            "error": "crawler timeout",
+            "error_code": "crawl_failed",
+        }
+    monkeypatch.setattr(app_module, "crawl_single_url_for_result", fake_crawl_single)
+    monkeypatch.setattr(app_module, "add_article", lambda url, title=None, site=None: 1)
+    monkeypatch.setattr(app_module, "add_read_count", lambda aid, count: None)
+    client = app.test_client()
+    resp = client.post(
+        "/api/articles",
+        data=json.dumps({"url": "https://juejin.cn/post/1"}),
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["success"] is True
+    assert data["data"]["initial_count"] == 0
+
+
 def test_create_article_add_article_value_error_returns_400(monkeypatch):
     """create_article returns 400 when add_article raises ValueError."""
-    async def fake_crawler():
-        class C:
-            async def __aexit__(self, *a):
-                pass
-        return C()
-    async def fake_extract(url, crawler):
-        return {"title": "T", "read_count": 0}
-    import monitor.extractors as ext
-    monkeypatch.setattr(ext, "create_shared_crawler", fake_crawler)
-    monkeypatch.setattr(ext, "extract_article_info", fake_extract)
+    async def fake_crawl_single(url):
+        return {"url": url, "success": True, "data": {"title": "T", "read_count": 0, "site": "juejin"}}
+    monkeypatch.setattr(app_module, "crawl_single_url_for_result", fake_crawl_single)
     def raise_val(url, title=None, site=None):
         raise ValueError("invalid")
     monkeypatch.setattr(app_module, "add_article", raise_val)
@@ -104,16 +127,9 @@ def test_create_article_add_article_value_error_returns_400(monkeypatch):
 
 def test_create_article_add_article_exception_returns_500(monkeypatch):
     """create_article returns 500 when add_article raises generic Exception."""
-    async def fake_crawler():
-        class C:
-            async def __aexit__(self, *a):
-                pass
-        return C()
-    async def fake_extract(url, crawler):
-        return {"title": "T", "read_count": 0}
-    import monitor.extractors as ext
-    monkeypatch.setattr(ext, "create_shared_crawler", fake_crawler)
-    monkeypatch.setattr(ext, "extract_article_info", fake_extract)
+    async def fake_crawl_single(url):
+        return {"url": url, "success": True, "data": {"title": "T", "read_count": 0, "site": "juejin"}}
+    monkeypatch.setattr(app_module, "crawl_single_url_for_result", fake_crawl_single)
     def raise_err(url, title=None, site=None):
         raise RuntimeError("db error")
     monkeypatch.setattr(app_module, "add_article", raise_err)
@@ -125,24 +141,17 @@ def test_create_article_add_article_exception_returns_500(monkeypatch):
         content_type="application/json",
     )
     assert resp.status_code == 500
+    assert resp.get_json()["error"] == "服务器内部错误，请稍后重试"
 
 
 def test_create_article_success(monkeypatch):
     """create_article success path with mocked extractors and DB."""
-    async def fake_crawler():
-        class C:
-            async def __aexit__(self, *a):
-                pass
-        return C()
-
-    async def fake_extract(url, crawler):
-        return {"title": "Test Title", "read_count": 42}
+    async def fake_crawl_single(url):
+        return {"url": url, "success": True, "data": {"title": "Test Title", "read_count": 42, "site": "juejin"}}
 
     monkeypatch.setattr(app_module, "add_article", lambda url, title=None, site=None: 1)
     monkeypatch.setattr(app_module, "add_read_count", lambda aid, count: None)
-    import monitor.extractors as extractors_module
-    monkeypatch.setattr(extractors_module, "create_shared_crawler", fake_crawler)
-    monkeypatch.setattr(extractors_module, "extract_article_info", fake_extract)
+    monkeypatch.setattr(app_module, "crawl_single_url_for_result", fake_crawl_single)
     client = app.test_client()
     resp = client.post(
         "/api/articles",
@@ -182,6 +191,7 @@ def test_batch_exception_returns_500(monkeypatch):
     )
     assert resp.status_code == 500
     assert resp.get_json()["success"] is False
+    assert resp.get_json()["error"] == "服务器内部错误，请稍后重试"
 
 
 def test_settings_get_and_update(monkeypatch):
@@ -438,6 +448,26 @@ def test_cancel_task_400(monkeypatch):
     assert resp.status_code == 400
 
 
+def test_get_running_tasks_200(monkeypatch):
+    """GET /api/tasks/running returns pending/running task list."""
+    class FakeTM:
+        def get_active_tasks(self):
+            return [
+                {"id": "t1", "status": "pending", "progress": {}},
+                {"id": "t2", "status": "running", "progress": {"stage": "crawling"}},
+            ]
+
+    import monitor.task_manager as task_manager_module
+    monkeypatch.setattr(task_manager_module, "get_task_manager", lambda: FakeTM())
+    client = app.test_client()
+    resp = client.get("/api/tasks/running")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["success"] is True
+    assert len(data["data"]) == 2
+    assert data["data"][1]["id"] == "t2"
+
+
 def test_get_failures_returns_200(monkeypatch):
     """GET /api/failures returns 200 with failures and stats."""
     monkeypatch.setattr(app_module, "get_all_failures", lambda limit=100, site=None: [])
@@ -581,11 +611,14 @@ def test_settings_post_non_numeric_returns_400():
 
 def test_bitable_sync_returns_202_with_task_id(monkeypatch):
     """POST /api/bitable/sync returns 202 Accepted with task_id and status_url (async)."""
-    monkeypatch.setattr(app_module, "_last_bitable_sync_time", 0.0)
+    monkeypatch.setattr(app_module, "_last_bitable_sync_time_by_source", {})
+    monkeypatch.setattr(app_module, "_last_bitable_sync_global_time", 0.0)
+    monkeypatch.setattr(app_module, "_bitable_sync_inflight_tasks", 0)
+    monkeypatch.setattr(app_module, "BITABLE_SYNC_GLOBAL_RATE_LIMIT_SECONDS", 0)
     client = app.test_client()
     resp = client.post(
         "/api/bitable/sync",
-        data=json.dumps({}),
+        data=json.dumps({"app_token": "tok", "table_id": "tbl"}),
         content_type="application/json",
     )
     assert resp.status_code == 202
@@ -599,7 +632,10 @@ def test_bitable_sync_returns_202_with_task_id(monkeypatch):
 
 def test_bitable_sync_success_shape(monkeypatch):
     """POST /api/bitable/sync returns 202 with task_id; result is polled via GET /api/tasks/<id>."""
-    monkeypatch.setattr(app_module, "_last_bitable_sync_time", 0.0)
+    monkeypatch.setattr(app_module, "_last_bitable_sync_time_by_source", {})
+    monkeypatch.setattr(app_module, "_last_bitable_sync_global_time", 0.0)
+    monkeypatch.setattr(app_module, "_bitable_sync_inflight_tasks", 0)
+    monkeypatch.setattr(app_module, "BITABLE_SYNC_GLOBAL_RATE_LIMIT_SECONDS", 0)
     client = app.test_client()
     resp = client.post(
         "/api/bitable/sync",
@@ -616,7 +652,10 @@ def test_bitable_sync_success_shape(monkeypatch):
 
 def test_bitable_sync_poll_task_until_completed(monkeypatch):
     """Submit Bitable sync, poll GET /api/tasks/<task_id> until completed; assert progress shape."""
-    monkeypatch.setattr(app_module, "_last_bitable_sync_time", 0.0)
+    monkeypatch.setattr(app_module, "_last_bitable_sync_time_by_source", {})
+    monkeypatch.setattr(app_module, "_last_bitable_sync_global_time", 0.0)
+    monkeypatch.setattr(app_module, "_bitable_sync_inflight_tasks", 0)
+    monkeypatch.setattr(app_module, "BITABLE_SYNC_GLOBAL_RATE_LIMIT_SECONDS", 0)
     fake_result = {
         "success": True,
         "processed": 5,
@@ -626,13 +665,13 @@ def test_bitable_sync_poll_task_until_completed(monkeypatch):
     }
     monkeypatch.setattr(
         bitable_sync_module,
-        "sync_from_bitable",
-        lambda **kw: fake_result,
+        "sync_from_bitable_via_shared_pool",
+        lambda source, progress_callback=None: fake_result,
     )
     client = app.test_client()
     resp = client.post(
         "/api/bitable/sync",
-        data=json.dumps({"app_token": "t", "table_id": "t"}),
+        data=json.dumps({"app_token": "token12345678", "table_id": "t"}),
         content_type="application/json",
     )
     assert resp.status_code == 202
@@ -653,6 +692,198 @@ def test_bitable_sync_poll_task_until_completed(monkeypatch):
     assert progress["updated"] == 4
     assert progress["failed"] == 1
     assert len(progress["errors"]) == 1
+    assert "app_token" not in progress["source"]
+    assert progress["source"]["app_token_masked"].endswith("5678")
+    assert "token12345678" not in progress["source"]["app_token_masked"]
+    assert progress["source"]["table_id"] == "t"
     assert progress["errors"][0]["record_id"] == "rec1"
     assert progress["errors"][0]["error"] == "timeout"
+
+
+def test_bitable_sync_requires_app_token_and_table_id(monkeypatch):
+    monkeypatch.setattr(app_module, "_last_bitable_sync_time_by_source", {})
+    monkeypatch.setattr(app_module, "_last_bitable_sync_global_time", 0.0)
+    monkeypatch.setattr(app_module, "_bitable_sync_inflight_tasks", 0)
+    monkeypatch.setattr(app_module, "BITABLE_SYNC_GLOBAL_RATE_LIMIT_SECONDS", 0)
+    monkeypatch.setattr(app_module, "FEISHU_BITABLE_APP_TOKEN", "")
+    monkeypatch.setattr(app_module, "FEISHU_BITABLE_TABLE_ID", "")
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/bitable/sync",
+        data=json.dumps({}),
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 400
+    assert "app_token" in resp.get_json()["error"]
+
+
+def test_bitable_sync_empty_body_uses_env_defaults(monkeypatch):
+    monkeypatch.setattr(app_module, "_last_bitable_sync_time_by_source", {})
+    monkeypatch.setattr(app_module, "_last_bitable_sync_global_time", 0.0)
+    monkeypatch.setattr(app_module, "_bitable_sync_inflight_tasks", 0)
+    monkeypatch.setattr(app_module, "BITABLE_SYNC_GLOBAL_RATE_LIMIT_SECONDS", 0)
+    monkeypatch.setattr(app_module, "FEISHU_BITABLE_APP_TOKEN", "env_tok")
+    monkeypatch.setattr(app_module, "FEISHU_BITABLE_TABLE_ID", "env_tbl")
+
+    class FakeTM:
+        def submit_task(self, func, *args, **kwargs):
+            return "task-env"
+
+    import monitor.task_manager as task_manager_module
+    monkeypatch.setattr(task_manager_module, "get_task_manager", lambda: FakeTM())
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/bitable/sync",
+        data=json.dumps({}),
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 202
+    data = resp.get_json()
+    assert data["success"] is True
+    assert data["data"]["task_id"] == "task-env"
+
+
+def test_bitable_sync_rate_limit_applies_per_same_table(monkeypatch):
+    monkeypatch.setattr(app_module, "_last_bitable_sync_time_by_source", {})
+    monkeypatch.setattr(app_module, "_last_bitable_sync_global_time", 0.0)
+    monkeypatch.setattr(app_module, "_bitable_sync_inflight_tasks", 0)
+    monkeypatch.setattr(app_module, "BITABLE_SYNC_GLOBAL_RATE_LIMIT_SECONDS", 0)
+
+    class FakeTM:
+        def submit_task(self, func, *args, **kwargs):
+            return "task-1"
+
+    import monitor.task_manager as task_manager_module
+    monkeypatch.setattr(task_manager_module, "get_task_manager", lambda: FakeTM())
+
+    client = app.test_client()
+    first = client.post(
+        "/api/bitable/sync",
+        data=json.dumps({"app_token": "app_a", "table_id": "table_a"}),
+        content_type="application/json",
+    )
+    second = client.post(
+        "/api/bitable/sync",
+        data=json.dumps({"app_token": "app_a", "table_id": "table_a"}),
+        content_type="application/json",
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 429
+
+
+def test_bitable_sync_rate_limit_does_not_block_other_table(monkeypatch):
+    monkeypatch.setattr(app_module, "_last_bitable_sync_time_by_source", {})
+    monkeypatch.setattr(app_module, "_last_bitable_sync_global_time", 0.0)
+    monkeypatch.setattr(app_module, "_bitable_sync_inflight_tasks", 0)
+    monkeypatch.setattr(app_module, "BITABLE_SYNC_GLOBAL_RATE_LIMIT_SECONDS", 0)
+
+    class FakeTM:
+        def __init__(self):
+            self.calls = 0
+
+        def submit_task(self, func, *args, **kwargs):
+            self.calls += 1
+            return f"task-{self.calls}"
+
+    fake_tm = FakeTM()
+    import monitor.task_manager as task_manager_module
+    monkeypatch.setattr(task_manager_module, "get_task_manager", lambda: fake_tm)
+
+    client = app.test_client()
+    first = client.post(
+        "/api/bitable/sync",
+        data=json.dumps({"app_token": "app_a", "table_id": "table_a"}),
+        content_type="application/json",
+    )
+    second = client.post(
+        "/api/bitable/sync",
+        data=json.dumps({"app_token": "app_a", "table_id": "table_b"}),
+        content_type="application/json",
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+
+
+def test_bitable_sync_global_rate_limit_blocks_burst(monkeypatch):
+    monkeypatch.setattr(app_module, "_last_bitable_sync_time_by_source", {})
+    monkeypatch.setattr(app_module, "_last_bitable_sync_global_time", 0.0)
+    monkeypatch.setattr(app_module, "_bitable_sync_inflight_tasks", 0)
+    monkeypatch.setattr(app_module, "BITABLE_SYNC_GLOBAL_RATE_LIMIT_SECONDS", 60)
+
+    class FakeTM:
+        def submit_task(self, func, *args, **kwargs):
+            return "task-1"
+
+    import monitor.task_manager as task_manager_module
+    monkeypatch.setattr(task_manager_module, "get_task_manager", lambda: FakeTM())
+
+    client = app.test_client()
+    first = client.post(
+        "/api/bitable/sync",
+        data=json.dumps({"app_token": "app_a", "table_id": "table_a"}),
+        content_type="application/json",
+    )
+    second = client.post(
+        "/api/bitable/sync",
+        data=json.dumps({"app_token": "app_a", "table_id": "table_b"}),
+        content_type="application/json",
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 429
+
+
+def test_bitable_sync_rejects_when_inflight_exceeds_limit(monkeypatch):
+    monkeypatch.setattr(app_module, "_last_bitable_sync_time_by_source", {})
+    monkeypatch.setattr(app_module, "_last_bitable_sync_global_time", 0.0)
+    monkeypatch.setattr(app_module, "BITABLE_SYNC_GLOBAL_RATE_LIMIT_SECONDS", 0)
+    monkeypatch.setattr(app_module, "BITABLE_SYNC_MAX_INFLIGHT_TASKS", 1)
+    monkeypatch.setattr(app_module, "_bitable_sync_inflight_tasks", 1)
+
+    client = app.test_client()
+    resp = client.post(
+        "/api/bitable/sync",
+        data=json.dumps({"app_token": "app_a", "table_id": "table_a"}),
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 429
+    assert "同步任务过多" in resp.get_json()["error"]
+
+
+def test_run_bitable_sync_async_updates_realtime_progress(monkeypatch):
+    updates = []
+
+    class FakeTM:
+        def update_task_progress(self, task_id, progress):
+            updates.append(progress)
+
+    def fake_sync(source, progress_callback=None):
+        if progress_callback:
+            progress_callback({"stage": "crawling", "url_progress": {"processed": 1, "total": 3}})
+            progress_callback({"stage": "crawling", "url_progress": {"processed": 2, "total": 3}})
+        return {
+            "success": True,
+            "processed": 3,
+            "updated": 3,
+            "failed": 0,
+            "errors": [],
+        }
+
+    import monitor.task_manager as task_manager_module
+    monkeypatch.setattr(task_manager_module, "get_task_manager", lambda: FakeTM())
+    monkeypatch.setattr(bitable_sync_module, "sync_from_bitable_via_shared_pool", fake_sync)
+
+    import asyncio
+    asyncio.run(app_module._run_bitable_sync_async("task-id-1", app_token="tok_1234", table_id="tbl_1"))
+
+    assert any(p.get("stage") == "queued" for p in updates)
+    assert any(p.get("stage") == "crawling" and p.get("url_progress", {}).get("processed") == 2 for p in updates)
+    assert any(p.get("stage") == "completed" and p.get("processed") == 3 for p in updates)
 

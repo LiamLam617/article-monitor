@@ -1,5 +1,4 @@
 """Integration tests for monitor.db.settings_repo with temp DB."""
-import pytest
 
 from monitor.db.settings_repo import get_setting, set_setting
 

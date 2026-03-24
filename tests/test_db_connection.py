@@ -1,5 +1,4 @@
 """Integration tests for monitor.db.connection with temp DB."""
-import pytest
 
 from monitor.db.connection import get_db, init_db
 

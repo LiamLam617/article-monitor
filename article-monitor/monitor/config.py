@@ -3,6 +3,29 @@
 支持环境变量配置
 """
 import os
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional dependency fallback
+    load_dotenv = None
+
+
+def _load_env_files():
+    """Load .env files before reading os.getenv values."""
+    if load_dotenv is None:
+        return
+    base_dir = Path(__file__).resolve().parent
+    candidates = [
+        base_dir.parent / ".env",
+        base_dir / ".env",
+    ]
+    for env_file in candidates:
+        if env_file.exists():
+            load_dotenv(env_file, override=False)
+
+
+_load_env_files()
 
 # 数据库文件路径
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

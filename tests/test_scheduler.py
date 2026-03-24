@@ -1,5 +1,4 @@
 """Unit tests for monitor.scheduler (get_interval_hours, start/update/stop)."""
-import pytest
 
 import monitor.scheduler as scheduler_module
 from monitor.scheduler import get_interval_hours, start_scheduler, update_schedule, stop_scheduler

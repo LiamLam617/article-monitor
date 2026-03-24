@@ -5,12 +5,13 @@ from flask import Flask, render_template, request, jsonify, Response
 from flask_cors import CORS
 import asyncio
 import time
-from typing import List, Optional
+import threading
+import hashlib
+from typing import Optional
 from .database import (
-    init_db, add_article, get_all_articles, get_all_articles_with_latest_count,
-    get_read_counts, delete_article, get_latest_read_count, get_setting, set_setting,
-    add_read_count, get_platform_health, get_platform_failures, get_all_failures,
-    get_failure_stats, add_articles_batch, add_read_counts_batch
+    init_db, add_article, get_all_articles_with_latest_count,
+    get_read_counts, delete_article, get_setting, set_setting,
+    add_read_count, get_all_failures, get_failure_stats
 )
 import logging
 
@@ -18,14 +19,47 @@ logger = logging.getLogger(__name__)
 from .scheduler import start_scheduler
 from .config import (
     FLASK_HOST, FLASK_PORT, FLASK_DEBUG, CRAWL_INTERVAL_HOURS,
+    FEISHU_BITABLE_APP_TOKEN, FEISHU_BITABLE_TABLE_ID,
     is_platform_allowed,
 )
 
-# Rate limit: min seconds between POST /api/bitable/sync calls (global)
+# Rate limit: min seconds between POST /api/bitable/sync calls (per app_token + table_id)
 BITABLE_SYNC_RATE_LIMIT_SECONDS = 60
-_last_bitable_sync_time = 0.0
+BITABLE_SYNC_GLOBAL_RATE_LIMIT_SECONDS = 2
+BITABLE_SYNC_MAX_INFLIGHT_TASKS = 20
+_last_bitable_sync_time_by_source = {}
+_last_bitable_sync_global_time = 0.0
+_bitable_sync_inflight_tasks = 0
+_bitable_sync_rate_limit_lock = threading.Lock()
+
+
+def _prune_bitable_sync_rate_limit(now_ts: float):
+    """清理过期 rate-limit 记录，避免常驻进程字典无限增长。"""
+    expire_before = now_ts - (BITABLE_SYNC_RATE_LIMIT_SECONDS * 10)
+    stale_keys = [
+        key for key, ts in _last_bitable_sync_time_by_source.items()
+        if ts < expire_before
+    ]
+    for key in stale_keys:
+        _last_bitable_sync_time_by_source.pop(key, None)
+
+
+def _mask_token(value: Optional[str]) -> str:
+    token = (value or "").strip()
+    if not token:
+        return ""
+    if len(token) <= 4:
+        return "*" * len(token)
+    return f"{'*' * (len(token) - 4)}{token[-4:]}"
+
+
+def _source_rate_limit_key(app_token: Optional[str], table_id: Optional[str]) -> str:
+    raw = f"{(app_token or '').strip()}::{(table_id or '').strip()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 from .url_utils import normalize_url, validate_and_normalize_url
-from .article_service import _process_urls_async, _process_urls_sync
+from .article_service import _process_urls_async, _process_urls_sync, crawl_single_url_for_result
 from .export_service import export_selected_articles_csv, export_all_articles_csv
 from .health_service import get_system_health_payload
 
@@ -34,6 +68,17 @@ CORS(app)
 
 # 初始化数据库
 init_db()
+
+
+def api_success(data=None, status_code: int = 200):
+    payload = {'success': True}
+    if data is not None:
+        payload['data'] = data
+    return jsonify(payload), status_code
+
+
+def api_error(message: str, status_code: int = 400):
+    return jsonify({'success': False, 'error': message}), status_code
 
 @app.route('/')
 def index():
@@ -49,7 +94,7 @@ def favicon():
 def get_articles():
     """获取所有文章（优化：使用批量查询避免N+1问题）"""
     articles = get_all_articles_with_latest_count()
-    return jsonify({'success': True, 'data': articles})
+    return api_success(articles)
 
 @app.route('/api/articles/batch', methods=['POST'])
 def create_articles_batch():
@@ -58,13 +103,13 @@ def create_articles_batch():
     urls = data.get('urls', [])
     
     if not urls:
-        return jsonify({'success': False, 'error': 'URL列表不能为空'}), 400
+        return api_error('URL列表不能为空', 400)
     
     # 去重、過濾空值、規範化 URL
     urls = list(set([normalize_url(u.strip()) for u in urls if u.strip()]))
     
     if not urls:
-        return jsonify({'success': False, 'error': '有效URL不能为空'}), 400
+        return api_error('有效URL不能为空', 400)
         
     # 如果URL数量较少（<=5），直接处理；否则使用异步任务
     if len(urls) <= 5:
@@ -74,10 +119,10 @@ def create_articles_batch():
             return jsonify({'success': True, 'results': results})
         except ValueError as e:
             logger.warning(f"批量添加文章參數錯誤: {e}")
-            return jsonify({'success': False, 'error': f'參數錯誤: {str(e)}'}), 400
+            return api_error(f'參數錯誤: {str(e)}', 400)
         except Exception as e:
             logger.error(f"批量添加文章失敗: {e}", exc_info=True)
-            return jsonify({'success': False, 'error': str(e)}), 500
+            return api_error('服务器内部错误，请稍后重试', 500)
     else:
         # 大批量：使用异步任务队列
         from .task_manager import get_task_manager
@@ -90,17 +135,6 @@ def create_articles_batch():
             'status_url': f'/api/tasks/{task_id}'
         })
 
-async def _process_urls_async(task_id: str, urls: List[str]):
-    """異步處理 URL 列表（委派給 article_service）"""
-    from .article_service import _process_urls_async as svc_async
-    await svc_async(task_id, urls)
-
-
-async def _process_urls_sync(urls: List[str]):
-    """同步處理 URL 列表（委派給 article_service）"""
-    from .article_service import _process_urls_sync as svc_sync
-    return await svc_sync(urls)
-
 @app.route('/api/articles', methods=['POST'])
 def create_article():
     """添加文章"""
@@ -108,39 +142,28 @@ def create_article():
     url = data.get('url', '').strip()
     
     if not url:
-        return jsonify({'success': False, 'error': 'URL不能为空'}), 400
-    
-    # 验证并规范化URL，检测平台
-    is_valid, normalized_url, site = validate_and_normalize_url(url)
-    if not is_valid:
-        return jsonify({'success': False, 'error': '无效的URL格式（只支持 http/https）'}), 400
-    
-    # 检查平台是否在白名单中
-    if not is_platform_allowed(site):
-        return jsonify({
-            'success': False,
-            'error': f'平台 "{site or "未知"}" 不在允许列表中，已跳过'
-        }), 400
-    
-    # 立即爬取一次获取标题和阅读数（使用统一的提取函数）
-    title = None
-    count = None
-    try:
-        from .extractors import extract_article_info, create_shared_crawler
-        
-        async def fetch_title_and_count():
-            crawler = await create_shared_crawler()
-            try:
-                info = await extract_article_info(normalized_url, crawler)
-                return info.get('title'), info.get('read_count')
-            finally:
-                await crawler.__aexit__(None, None, None)
-        
-        title, count = asyncio.run(fetch_title_and_count())
-    except Exception as e:
-        logger.warning(f"初次爬取失败 {normalized_url}: {e}")
-        count = None
+        return api_error('URL不能为空', 400)
+
+    crawl_result = asyncio.run(crawl_single_url_for_result(url))
+    if not crawl_result.get('success'):
+        error_message = crawl_result.get('error', 'URL处理失败')
+        error_code = crawl_result.get('error_code')
+        if error_code in ('invalid_url', 'platform_not_allowed'):
+            return api_error(error_message, 400)
+        # 保持历史行为：爬取失败时仍允许先入库，阅读数回退为 0。
+        is_valid, normalized_url, site = validate_and_normalize_url(url)
+        if not is_valid:
+            return api_error('无效的URL格式（只支持 http/https）', 400)
+        if not is_platform_allowed(site):
+            return api_error(f'平台 "{site or "未知"}" 不在允许列表中，已跳过', 400)
         title = None
+        count = None
+    else:
+        data_payload = crawl_result.get('data') or {}
+        normalized_url = crawl_result.get('url') or url
+        site = data_payload.get('site')
+        title = data_payload.get('title')
+        count = data_payload.get('read_count')
     
     try:
         article_id = add_article(normalized_url, title=title, site=site)
@@ -149,29 +172,26 @@ def create_article():
         initial_count = count if count is not None else 0
         add_read_count(article_id, initial_count)
         
-        return jsonify({
-            'success': True,
-            'data': {'id': article_id, 'url': normalized_url, 'title': title, 'site': site, 'initial_count': initial_count}
-        })
+        return api_success({'id': article_id, 'url': normalized_url, 'title': title, 'site': site, 'initial_count': initial_count})
     except ValueError as e:
         logger.warning(f"添加文章參數錯誤: {e}")
-        return jsonify({'success': False, 'error': f'參數錯誤: {str(e)}'}), 400
+        return api_error(f'參數錯誤: {str(e)}', 400)
     except Exception as e:
         logger.error(f"添加文章失敗: {e}", exc_info=True)
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return api_error('服务器内部错误，请稍后重试', 500)
 
 @app.route('/api/articles/<int:article_id>', methods=['DELETE'])
 def remove_article(article_id):
     """删除文章"""
     try:
         delete_article(article_id)
-        return jsonify({'success': True})
+        return api_success()
     except ValueError as e:
         logger.warning(f"刪除文章參數錯誤: {e}")
-        return jsonify({'success': False, 'error': f'參數錯誤: {str(e)}'}), 400
+        return api_error(f'參數錯誤: {str(e)}', 400)
     except Exception as e:
         logger.error(f"刪除文章失敗: {e}", exc_info=True)
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return api_error(str(e), 500)
 
 @app.route('/api/articles/<int:article_id>/history', methods=['GET'])
 def get_history(article_id):
@@ -361,6 +381,18 @@ def get_task_status(task_id):
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
+@app.route('/api/tasks/running', methods=['GET'])
+def get_running_tasks():
+    """获取系统当前正在执行/排队的任务列表。"""
+    try:
+        from .task_manager import get_task_manager
+        task_manager = get_task_manager()
+        tasks = task_manager.get_active_tasks()
+        return jsonify({'success': True, 'data': tasks})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/tasks/<task_id>', methods=['DELETE'])
 def cancel_task(task_id):
     """取消任务"""
@@ -474,71 +506,95 @@ async def _run_bitable_sync_async(
     *,
     app_token: Optional[str] = None,
     table_id: Optional[str] = None,
-    field_url: Optional[str] = None,
-    field_total_read: Optional[str] = None,
-    field_read_24h: Optional[str] = None,
-    field_read_72h: Optional[str] = None,
-    field_error: Optional[str] = None,
 ):
     """后台执行 Bitable 同步，结果写入任务 progress。"""
     from .task_manager import get_task_manager
-    from .bitable_sync import sync_from_bitable
+    from .bitable_sync import sync_from_bitable_via_shared_pool
+    global _bitable_sync_inflight_tasks
 
-    result = await asyncio.to_thread(
-        sync_from_bitable,
-        app_token=app_token,
-        table_id=table_id,
-        field_url=field_url,
-        field_total_read=field_total_read,
-        field_read_24h=field_read_24h,
-        field_read_72h=field_read_72h,
-        field_error=field_error,
-    )
-    progress = {
-        'success': result.get('success', False),
-        'processed': result.get('processed', 0),
-        'updated': result.get('updated', 0),
-        'failed': result.get('failed', 0),
-        'errors': result.get('errors', []),
+    source_info = {
+        'app_token_masked': _mask_token(app_token),
+        'table_id': table_id,
     }
-    if result.get('message'):
-        progress['message'] = result['message']
-    get_task_manager().update_task_progress(task_id, progress)
+
+    def _report_progress(event: dict):
+        progress_payload = {'source': source_info}
+        progress_payload.update(event or {})
+        get_task_manager().update_task_progress(task_id, progress_payload)
+
+    try:
+        _report_progress({
+            'stage': 'queued',
+            'batch_url_progress': {'processed': 0, 'total': 0},
+        })
+        result = await asyncio.to_thread(
+            sync_from_bitable_via_shared_pool,
+            {
+                'app_token': app_token,
+                'table_id': table_id,
+            },
+            _report_progress,
+        )
+        progress = {
+            'stage': 'completed',
+            'success': result.get('success', False),
+            'processed': result.get('processed', 0),
+            'updated': result.get('updated', 0),
+            'failed': result.get('failed', 0),
+            'errors': result.get('errors', []),
+            'source': source_info,
+        }
+        if result.get('message'):
+            progress['message'] = result['message']
+        get_task_manager().update_task_progress(task_id, progress)
+    finally:
+        with _bitable_sync_rate_limit_lock:
+            _bitable_sync_inflight_tasks = max(0, _bitable_sync_inflight_tasks - 1)
 
 
 @app.route('/api/bitable/sync', methods=['POST'])
 def bitable_sync():
-    """从飞书 Bitable 拉取发布链接 → 爬取 → 写回。异步执行，立即返回 202 + task_id，通过 GET /api/tasks/<task_id> 轮询结果。"""
-    global _last_bitable_sync_time
+    """单表同步入口：每次仅接收 app_token + table_id，后台进共享爬取池执行。"""
+    global _last_bitable_sync_global_time, _bitable_sync_inflight_tasks
     try:
-        now = time.time()
-        if now - _last_bitable_sync_time < BITABLE_SYNC_RATE_LIMIT_SECONDS:
-            return jsonify({
-                'success': False,
-                'error': '请求过于频繁，请稍后再试',
-            }), 429
-        _last_bitable_sync_time = now
-
         data = request.json or {}
-        app_token = (data.get('app_token') or '').strip() or None
-        table_id = (data.get('table_id') or '').strip() or None
-        field_url = data.get('field_url')
-        field_total_read = data.get('field_total_read')
-        field_read_24h = data.get('field_read_24h')
-        field_read_72h = data.get('field_read_72h')
-        field_error = data.get('field_error')
+        app_token = (data.get('app_token') or FEISHU_BITABLE_APP_TOKEN or '').strip() or None
+        table_id = (data.get('table_id') or FEISHU_BITABLE_TABLE_ID or '').strip() or None
+        if not app_token or not table_id:
+            return api_error('app_token 和 table_id 为必填', 400)
+
+        now = time.time()
+        source_key = _source_rate_limit_key(app_token, table_id)
+        with _bitable_sync_rate_limit_lock:
+            if _bitable_sync_inflight_tasks >= BITABLE_SYNC_MAX_INFLIGHT_TASKS:
+                return jsonify({
+                    'success': False,
+                    'error': '同步任务过多，请稍后再试',
+                }), 429
+            if now - _last_bitable_sync_global_time < BITABLE_SYNC_GLOBAL_RATE_LIMIT_SECONDS:
+                return jsonify({
+                    'success': False,
+                    'error': '请求过于频繁，请稍后再试',
+                }), 429
+            _prune_bitable_sync_rate_limit(now)
+            last_time = _last_bitable_sync_time_by_source.get(source_key, 0.0)
+            if now - last_time < BITABLE_SYNC_RATE_LIMIT_SECONDS:
+                return api_error('请求过于频繁，请稍后再试', 429)
+            _last_bitable_sync_global_time = now
+            _last_bitable_sync_time_by_source[source_key] = now
+            _bitable_sync_inflight_tasks += 1
 
         from .task_manager import get_task_manager
-        task_id = get_task_manager().submit_task(
-            _run_bitable_sync_async,
-            app_token=app_token,
-            table_id=table_id,
-            field_url=field_url,
-            field_total_read=field_total_read,
-            field_read_24h=field_read_24h,
-            field_read_72h=field_read_72h,
-            field_error=field_error,
-        )
+        try:
+            task_id = get_task_manager().submit_task(
+                _run_bitable_sync_async,
+                app_token=app_token,
+                table_id=table_id,
+            )
+        except Exception:
+            with _bitable_sync_rate_limit_lock:
+                _bitable_sync_inflight_tasks = max(0, _bitable_sync_inflight_tasks - 1)
+            raise
         return jsonify({
             'success': True,
             'data': {
@@ -548,9 +604,9 @@ def bitable_sync():
             },
             'status_url': f'/api/tasks/{task_id}',
         }), 202
-    except Exception as e:
+    except Exception:
         logger.exception("Bitable sync 请求处理异常")
-        return jsonify({'success': False, 'error': '服务器内部错误，请稍后重试'}), 500
+        return api_error('服务器内部错误，请稍后重试', 500)
 
 
 @app.route('/api/monitor/health', methods=['GET'])

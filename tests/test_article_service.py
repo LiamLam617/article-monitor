@@ -1,7 +1,6 @@
 import asyncio
+import time
 from typing import List
-
-import pytest
 
 import monitor.article_service as article_service
 
@@ -134,4 +133,144 @@ def test_crawl_urls_for_results_return_structure(monkeypatch):
     assert "data" in r
     assert r["data"]["read_count"] == 10
     assert "initial_count" not in r["data"]  # crawl_urls_for_results 只返回 read_count
+
+
+def test_crawl_single_url_for_result_invalid_url(monkeypatch):
+    monkeypatch.setattr(article_service, "validate_and_normalize_url", lambda u: (False, u, None))
+    result = run(article_service.crawl_single_url_for_result("bad-url"))
+    assert result["success"] is False
+    assert "无效的URL格式" in result["error"]
+
+
+def test_crawl_single_url_for_result_success(monkeypatch):
+    dummy_pool = DummyBrowserPool()
+
+    async def fake_extract(url, crawler):
+        return {"title": "ok", "read_count": 7}
+
+    monkeypatch.setattr(article_service, "get_browser_pool", lambda: dummy_pool)
+    monkeypatch.setattr(article_service, "extract_article_info", fake_extract)
+    monkeypatch.setattr(article_service, "create_shared_crawler", lambda: DummyCrawler())
+    monkeypatch.setattr(article_service, "validate_and_normalize_url", lambda u: (True, u, "juejin"))
+    monkeypatch.setattr(article_service, "is_platform_allowed", lambda s: True)
+
+    result = run(article_service.crawl_single_url_for_result("https://juejin.cn/post/1"))
+    assert result["success"] is True
+    assert result["data"]["title"] == "ok"
+    assert result["data"]["read_count"] == 7
+    assert result["data"]["site"] == "juejin"
+
+
+def test_crawl_urls_for_results_respects_domain_min_delay(monkeypatch):
+    dummy_pool = DummyBrowserPool()
+    call_times = []
+
+    async def fake_extract(url, crawler):
+        call_times.append(time.monotonic())
+        return {"title": "t", "read_count": 10}
+
+    monkeypatch.setattr(article_service, "get_browser_pool", lambda: dummy_pool)
+    monkeypatch.setattr(article_service, "extract_article_info", fake_extract)
+    monkeypatch.setattr(article_service, "create_shared_crawler", lambda: DummyCrawler())
+    monkeypatch.setattr(article_service, "validate_and_normalize_url", lambda u: (True, u, "juejin"))
+    monkeypatch.setattr(article_service, "is_platform_allowed", lambda s: True)
+    monkeypatch.setattr(article_service, "CRAWL_CONCURRENCY_PER_DOMAIN", 1)
+    monkeypatch.setattr(article_service, "CRAWL_MIN_DELAY_PER_DOMAIN", 0.05)
+
+    urls = [
+        "https://juejin.cn/post/1",
+        "https://juejin.cn/post/2",
+    ]
+    results = run(article_service.crawl_urls_for_results(urls))
+
+    assert len(results) == 2
+    assert results[0]["success"] is True
+    assert results[1]["success"] is True
+    assert len(call_times) == 2
+    assert (call_times[1] - call_times[0]) >= 0.045
+
+
+def test_crawl_urls_for_results_respects_domain_min_delay_with_concurrency(monkeypatch):
+    dummy_pool = DummyBrowserPool()
+    call_times = []
+
+    async def fake_extract(url, crawler):
+        call_times.append(time.monotonic())
+        return {"title": "t", "read_count": 10}
+
+    monkeypatch.setattr(article_service, "get_browser_pool", lambda: dummy_pool)
+    monkeypatch.setattr(article_service, "extract_article_info", fake_extract)
+    monkeypatch.setattr(article_service, "create_shared_crawler", lambda: DummyCrawler())
+    monkeypatch.setattr(article_service, "validate_and_normalize_url", lambda u: (True, u, "juejin"))
+    monkeypatch.setattr(article_service, "is_platform_allowed", lambda s: True)
+    monkeypatch.setattr(article_service, "CRAWL_CONCURRENCY_PER_DOMAIN", 3)
+    monkeypatch.setattr(article_service, "CRAWL_MIN_DELAY_PER_DOMAIN", 0.03)
+    monkeypatch.setattr(article_service, "BATCH_PROCESS_CONCURRENCY", 3)
+
+    urls = [
+        "https://juejin.cn/post/1",
+        "https://juejin.cn/post/2",
+        "https://juejin.cn/post/3",
+    ]
+    results = run(article_service.crawl_urls_for_results(urls))
+
+    assert len(results) == 3
+    assert all(r["success"] is True for r in results)
+    assert len(call_times) == 3
+    ordered = sorted(call_times)
+    # Windows timer granularity can be coarse; assert overall spread instead of per-step equality.
+    assert (ordered[-1] - ordered[0]) >= 0.04
+
+
+def test_crawl_single_url_for_result_timeout_returns_failure(monkeypatch):
+    dummy_pool = DummyBrowserPool()
+
+    async def fake_extract(url, crawler):
+        await asyncio.sleep(1.2)
+        return {"title": "late", "read_count": 1}
+
+    monkeypatch.setattr(article_service, "get_browser_pool", lambda: dummy_pool)
+    monkeypatch.setattr(article_service, "extract_article_info", fake_extract)
+    monkeypatch.setattr(article_service, "create_shared_crawler", lambda: DummyCrawler())
+    monkeypatch.setattr(article_service, "validate_and_normalize_url", lambda u: (True, u, "juejin"))
+    monkeypatch.setattr(article_service, "is_platform_allowed", lambda s: True)
+    monkeypatch.setattr(article_service, "CRAWL_TIMEOUT", 1)
+
+    result = run(article_service.crawl_single_url_for_result("https://juejin.cn/post/timeout"))
+    assert result["success"] is False
+    assert result["error_code"] == "crawl_timeout"
+    assert "超时" in result["error"]
+
+
+def test_crawl_single_url_timeout_includes_domain_semaphore_wait(monkeypatch):
+    dummy_pool = DummyBrowserPool()
+
+    async def fake_extract(url, crawler):
+        return {"title": "ok", "read_count": 9}
+
+    async def run_case():
+        monkeypatch.setattr(article_service, "get_browser_pool", lambda: dummy_pool)
+        monkeypatch.setattr(article_service, "extract_article_info", fake_extract)
+        monkeypatch.setattr(article_service, "create_shared_crawler", lambda: DummyCrawler())
+        monkeypatch.setattr(article_service, "validate_and_normalize_url", lambda u: (True, u, "juejin"))
+        monkeypatch.setattr(article_service, "is_platform_allowed", lambda s: True)
+        monkeypatch.setattr(article_service, "CRAWL_TIMEOUT", 0.2)
+        monkeypatch.setattr(article_service, "CRAWL_CONCURRENCY_PER_DOMAIN", 1)
+        monkeypatch.setattr(article_service, "CRAWL_MIN_DELAY_PER_DOMAIN", 0)
+
+        controller = article_service._DomainThrottleController()
+        sem = await controller.get_semaphore("https://juejin.cn/post/lock")
+        await sem.acquire()
+        try:
+            return await article_service.crawl_single_url_for_result(
+                "https://juejin.cn/post/wait",
+                browser_pool=dummy_pool,
+                domain_controller=controller,
+            )
+        finally:
+            sem.release()
+
+    result = run(run_case())
+    assert result["success"] is False
+    assert result["error_code"] == "crawl_timeout"
 

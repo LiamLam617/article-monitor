@@ -4,9 +4,10 @@ Flask应用 - 简单的RESTful API和前端
 from flask import Flask, render_template, request, jsonify, Response, g
 from flask_cors import CORS
 import asyncio
-import time
-import threading
 import hashlib
+import re
+import threading
+import time
 from uuid import uuid4
 from typing import Optional
 from werkzeug.exceptions import HTTPException
@@ -79,8 +80,6 @@ _REQUEST_ID_PATTERN = r"^[A-Za-z0-9._:-]{8,64}$"
 def _valid_external_request_id(value: str) -> bool:
     if not value:
         return False
-    import re
-
     return re.match(_REQUEST_ID_PATTERN, value) is not None
 
 

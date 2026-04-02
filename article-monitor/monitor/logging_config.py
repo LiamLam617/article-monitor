@@ -1,4 +1,5 @@
 """Application logging configuration."""
+
 import atexit
 import json
 import logging
@@ -12,10 +13,29 @@ from typing import Any, Dict, Optional
 from .logging_context import get_log_context
 
 _STANDARD_LOG_RECORD_FIELDS = {
-    "args", "asctime", "created", "exc_info", "exc_text", "filename", "funcName",
-    "levelname", "levelno", "lineno", "module", "msecs", "message", "msg", "name",
-    "pathname", "process", "processName", "relativeCreated", "stack_info", "thread",
-    "threadName", "taskName",
+    "args",
+    "asctime",
+    "created",
+    "exc_info",
+    "exc_text",
+    "filename",
+    "funcName",
+    "levelname",
+    "levelno",
+    "lineno",
+    "module",
+    "msecs",
+    "message",
+    "msg",
+    "name",
+    "pathname",
+    "process",
+    "processName",
+    "relativeCreated",
+    "stack_info",
+    "thread",
+    "threadName",
+    "taskName",
 }
 
 _SENSITIVE_KEY_PATTERN = re.compile(
@@ -35,6 +55,7 @@ _SCHEMA_VERSION = "1.0"
 
 _dropped_events = 0
 _redaction_error_count = 0
+
 
 def _is_truthy(value: str) -> bool:
     return (value or "").strip().lower() in ("1", "true", "yes", "on")
@@ -64,6 +85,24 @@ class JsonFormatter(logging.Formatter):
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False)
+
+
+class SimpleConsoleFormatter(logging.Formatter):
+    """Simplified formatter for console - shows time, level, action and detail."""
+
+    def __init__(self):
+        super().__init__(
+            fmt="%(asctime)s | %(levelname)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+
+    def format(self, record: logging.LogRecord) -> str:
+        base = super().format(record)
+        # 如果有 event 欄位，添加到 message 中
+        event = getattr(record, "event", None)
+        if event:
+            return f"{base} | event={event}"
+        return base
 
 
 class TextWithExtrasFormatter(logging.Formatter):
@@ -146,9 +185,11 @@ class NonBlockingQueueHandler(QueueHandler):
             _dropped_events += 1
 
 
-def _create_formatter(log_format: str) -> logging.Formatter:
+def _create_formatter(log_format: str, simple: bool = False) -> logging.Formatter:
     if log_format == "json":
         return JsonFormatter()
+    if simple:
+        return SimpleConsoleFormatter()
     return TextWithExtrasFormatter(
         "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         "%Y-%m-%d %H:%M:%S",
@@ -225,7 +266,9 @@ def get_logging_stats() -> Dict[str, Any]:
 def setup_logging(force: bool = False) -> logging.Logger:
     """Configure root logger for the application."""
     root_logger = logging.getLogger()
-    has_managed = any(getattr(h, _MANAGED_HANDLER_ATTR, False) for h in root_logger.handlers)
+    has_managed = any(
+        getattr(h, _MANAGED_HANDLER_ATTR, False) for h in root_logger.handlers
+    )
     if has_managed and not force:
         return root_logger
 
@@ -239,35 +282,47 @@ def setup_logging(force: bool = False) -> logging.Logger:
     root_logger.setLevel(log_level)
     root_logger.propagate = False
 
-    console_format = (os.getenv("ARTICLE_MONITOR_LOG_FORMAT_CONSOLE", "text") or "text").strip().lower()
-    file_format = (os.getenv("ARTICLE_MONITOR_LOG_FORMAT_FILE", "json") or "json").strip().lower()
+    console_format = (
+        (os.getenv("ARTICLE_MONITOR_LOG_FORMAT_CONSOLE", "text") or "text")
+        .strip()
+        .lower()
+    )
+    file_format = (
+        (os.getenv("ARTICLE_MONITOR_LOG_FORMAT_FILE", "json") or "json").strip().lower()
+    )
     if console_format not in ("text", "json"):
         console_format = "text"
     if file_format not in ("text", "json"):
         file_format = "json"
 
     legacy_debug_log_path = (os.getenv("ARTICLE_MONITOR_DEBUG_LOG") or "").strip()
-    log_to_file = _is_truthy(os.getenv("ARTICLE_MONITOR_LOG_TO_FILE", "0")) or bool(legacy_debug_log_path)
+    log_to_file = _is_truthy(os.getenv("ARTICLE_MONITOR_LOG_TO_FILE", "0")) or bool(
+        legacy_debug_log_path
+    )
 
     context_filter = ContextFilter()
     redaction_filter = RedactionFilter()
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(log_level)
-    stream_handler.setFormatter(_create_formatter(console_format))
+    stream_handler.setFormatter(_create_formatter(console_format, simple=True))
     stream_handler.addFilter(context_filter)
     stream_handler.addFilter(redaction_filter)
     setattr(stream_handler, _MANAGED_HANDLER_ATTR, True)
 
     downstream_handlers = [stream_handler]
     if log_to_file:
-        file_path = os.getenv("ARTICLE_MONITOR_LOG_FILE", "").strip() or legacy_debug_log_path
+        file_path = (
+            os.getenv("ARTICLE_MONITOR_LOG_FILE", "").strip() or legacy_debug_log_path
+        )
         if not file_path:
             project_root = Path(__file__).resolve().parents[1]
             file_path = str(project_root / "logs" / "article-monitor.log")
         log_path = Path(file_path)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        max_bytes = max(1024, int(os.getenv("ARTICLE_MONITOR_LOG_MAX_BYTES", str(50 * 1024 * 1024))))
+        max_bytes = max(
+            1024, int(os.getenv("ARTICLE_MONITOR_LOG_MAX_BYTES", str(50 * 1024 * 1024)))
+        )
         backup_count = max(1, int(os.getenv("ARTICLE_MONITOR_LOG_BACKUP_COUNT", "10")))
         file_handler = RotatingFileHandler(
             log_path,
@@ -291,7 +346,9 @@ def setup_logging(force: bool = False) -> logging.Logger:
         queue_handler.setLevel(log_level)
         queue_handler.addFilter(context_filter)
         setattr(queue_handler, _MANAGED_HANDLER_ATTR, True)
-        listener = QueueListener(log_queue, *downstream_handlers, respect_handler_level=True)
+        listener = QueueListener(
+            log_queue, *downstream_handlers, respect_handler_level=True
+        )
         listener.start()
         setattr(root_logger, _QUEUE_LISTENER_ATTR, listener)
         setattr(root_logger, _QUEUE_ATTR, log_queue)

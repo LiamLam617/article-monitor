@@ -29,7 +29,9 @@ _load_env_files()
 
 # 数据库文件路径
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATABASE_PATH = os.path.join(BASE_DIR, '..', 'data', 'monitor.db')
+DATABASE_PATH = os.path.normpath(
+    os.path.abspath(os.path.join(BASE_DIR, '..', 'data', 'monitor.db'))
+)
 
 # 可選調試日誌路徑（主要供開發除錯使用）
 DEBUG_LOG_PATH = os.getenv('ARTICLE_MONITOR_DEBUG_LOG') or None

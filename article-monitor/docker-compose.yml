@@ -22,7 +22,7 @@ services:
       - ./logs:/app/logs
       - /etc/localtime:/etc/localtime:ro
 
-    # env_file: .env   # 有 .env 時取消註解，可覆蓋下方環境變數
+    env_file: .env   # 有 .env 時取消註解，可覆蓋下方環境變數
     environment:
       - TZ=Asia/Shanghai
       - PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright

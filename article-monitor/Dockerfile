@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     tzdata \
     ca-certificates \
+    util-linux \
     && ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime \
     && echo ${TZ} > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
@@ -36,19 +37,20 @@ RUN playwright install-deps chromium \
     && PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/playwright playwright install chromium \
     && chmod -R 755 /usr/local/share/playwright
 
-# 非 root 運行（安全）
+# 應用進程以 monitor 運行；entrypoint 短暫以 root 修正卷權限（見 docker-entrypoint.sh）
 RUN groupadd -r monitor && useradd -r -g monitor -d /app -s /sbin/nologin monitor
 
 COPY . .
 
-# 數據與日誌目錄（卷掛載時可覆蓋）
+# 數據與日誌目錄（卷掛載時可覆蓋）；entrypoint 以 root 修正 bind mount 權限後再降權為 monitor
 RUN mkdir -p /app/data /app/logs \
+    && chmod +x /app/docker-entrypoint.sh \
     && chown -R monitor:monitor /app \
     && chown -R monitor:monitor /usr/local/share/playwright
 
-USER monitor
-
 EXPOSE 5000
+
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:5000/ || exit 1

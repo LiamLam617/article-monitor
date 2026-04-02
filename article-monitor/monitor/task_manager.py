@@ -11,6 +11,7 @@ from enum import Enum
 import logging
 
 logger = logging.getLogger(__name__)
+from .logging_context import current_log_context_or_none, set_log_context, reset_log_context, run_with_current_log_context
 
 class TaskStatus(Enum):
     """任务状态"""
@@ -97,7 +98,15 @@ class TaskManager:
                 
                 # 执行任务
                 try:
-                    await task['func'](task_id, *task.get('args', []), **task.get('kwargs', {}))
+                    ctx_fields = task.get("log_context") or {}
+                    token = None
+                    if ctx_fields:
+                        token = set_log_context(**ctx_fields)
+                    try:
+                        await task['func'](task_id, *task.get('args', []), **task.get('kwargs', {}))
+                    finally:
+                        if token is not None:
+                            reset_log_context(token)
                     with self._task_lock:
                         task['status'] = TaskStatus.COMPLETED
                         task['end_time'] = datetime.now().isoformat()
@@ -134,6 +143,7 @@ class TaskManager:
             'func': func,
             'args': args,
             'kwargs': kwargs,
+            'log_context': current_log_context_or_none(),
             'start_time': datetime.now().isoformat(),
             'end_time': None,
             'progress': {},
@@ -166,7 +176,7 @@ class TaskManager:
             logger.error(f"添加任務到隊列失敗: {e}")
             raise RuntimeError(f"無法添加任務到隊列: {e}")
         
-        logger.info(f"任务已提交: {task_id}")
+        logger.info("task.submitted", extra={"event": "task.submitted", "task_id": task_id})
         return task_id
     
     def get_task(self, task_id: str) -> Optional[Dict]:

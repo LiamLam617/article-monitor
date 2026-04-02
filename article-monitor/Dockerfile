@@ -20,8 +20,6 @@ ENV PYTHONUNBUFFERED=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     tzdata \
-    wget \
-    gnupg \
     ca-certificates \
     && ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime \
     && echo ${TZ} > /etc/timezone \
@@ -30,8 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # 依賴先行，利用分層緩存
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+COPY requirements.runtime.txt ./
+RUN pip install --no-cache-dir -r requirements.runtime.txt 
 
 # Playwright + Chromium（爬蟲必需）；全局路徑供所有用戶使用
 RUN playwright install-deps chromium \

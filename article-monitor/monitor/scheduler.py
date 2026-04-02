@@ -8,7 +8,6 @@ from .crawler import crawl_all_sync
 from .config import CRAWL_INTERVAL_HOURS
 from .database import get_setting
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler()

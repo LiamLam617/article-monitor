@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
@@ -10,16 +12,71 @@ from .config import (
     CRAWL_TIMEOUT,
     CRAWL_CONCURRENCY_PER_DOMAIN,
     CRAWL_MIN_DELAY_PER_DOMAIN,
+    RESULT_RETRY_EXTRA_PASSES,
     is_platform_allowed,
 )
 from .task_manager import get_task_manager
 from .browser_pool import get_browser_pool
 from .extractors import extract_article_info, create_shared_crawler
 from .database import add_articles_batch, add_read_counts_batch
+from .retry_policy import RESULT_RETRYABLE_ERROR_CODES
 from .url_utils import validate_and_normalize_url
 
 
 logger = logging.getLogger(__name__)
+
+async def _merge_retry_passes(
+    *,
+    urls: List[str],
+    all_results: List[Dict],
+    extra_passes: int,
+    batch_size: int,
+    browser_pool,
+    domain_controller: _DomainThrottleController,
+    on_result=None,
+) -> List[Dict]:
+    """Retry failed items for a limited number of additional passes.
+
+    Returns a new results list with retry payloads applied by index (never reorders).
+    """
+    current_results = list(all_results)
+    for _pass in range(int(extra_passes)):
+        retry_urls: List[str] = []
+        retry_indexes: List[int] = []
+        for idx, result in enumerate(current_results):
+            if not isinstance(result, dict):
+                continue
+            if result.get("success") is True:
+                continue
+            code = result.get("error_code")
+            if code in RESULT_RETRYABLE_ERROR_CODES:
+                retry_indexes.append(idx)
+                retry_urls.append(result.get("url") or urls[idx])
+
+        if not retry_urls:
+            break
+
+        retry_results: List[Dict] = []
+        for i in range(0, len(retry_urls), batch_size):
+            batch_urls = retry_urls[i : i + batch_size]
+            batch_results = await _crawl_batch_for_results(
+                batch_urls,
+                browser_pool,
+                domain_controller,
+                on_result=on_result,
+            )
+            retry_results.extend(batch_results)
+
+        retry_map = {
+            idx: payload
+            for idx, payload in zip(retry_indexes, retry_results)
+            if isinstance(payload, dict)
+        }
+        if retry_map:
+            current_results = [
+                retry_map.get(idx, existing) for idx, existing in enumerate(current_results)
+            ]
+    return current_results
 
 
 class _DomainThrottleController:
@@ -120,6 +177,16 @@ async def crawl_urls_for_results(urls: List[str], on_result=None) -> List[Dict]:
             on_result=on_result,
         )
         all_results.extend(batch_results)
+
+    all_results = await _merge_retry_passes(
+        urls=urls,
+        all_results=all_results,
+        extra_passes=RESULT_RETRY_EXTRA_PASSES,
+        batch_size=batch_size,
+        browser_pool=browser_pool,
+        domain_controller=domain_controller,
+        on_result=on_result,
+    )
     return all_results
 
 
@@ -184,14 +251,20 @@ async def crawl_single_url_for_result(
                     if domain_controller is not None:
                         await domain_controller.mark_done(normalized_url)
 
-                read_count = count if count is not None else 0
+                if count is None:
+                    return {
+                        'url': raw_url,
+                        'success': False,
+                        'error': '无法提取阅读数',
+                        'error_code': 'parse_failed',
+                    }
                 return {
                     'url': normalized_url,
                     'success': True,
                     'data': {
                         'title': title,
                         'site': site,
-                        'read_count': read_count,
+                        'read_count': count,
                     },
                 }
             except Exception as e:

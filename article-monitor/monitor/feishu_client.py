@@ -41,8 +41,12 @@ _client: Optional[lark.Client] = None
 def _get_client(app_id: Optional[str] = None, app_secret: Optional[str] = None) -> lark.Client:
     """获取或创建 lark Client，用于调用飞书 API。"""
     global _client
-    app_id = app_id or FEISHU_APP_ID
-    app_secret = app_secret or FEISHU_APP_SECRET
+    # Treat explicit empty strings as invalid overrides (tests rely on this),
+    # and only fall back to env defaults when the argument is truly absent (None).
+    if app_id is None:
+        app_id = FEISHU_APP_ID
+    if app_secret is None:
+        app_secret = FEISHU_APP_SECRET
     if not app_id or not app_secret:
         raise ValueError("未配置 FEISHU_APP_ID / FEISHU_APP_SECRET")
     if _client is None:

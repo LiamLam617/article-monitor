@@ -7,14 +7,10 @@ PLATFORM_EXTRACTORS = {
     'juejin': {
         'wait_for': 'css:.views-count',
         'timeout': 30000,
-        'delay_before_return': 5000,
-        'js_extract': True,
+        'delay_before_return': 0,
+        'js_extract': False,
         'patterns': [
-            r'JUEJIN_VIEWS_COUNT:([\d,]+)',
-            r'class="views-count"[^>]*>\s*([\d,]+)\s*</span>',
-            r'class="views-count"[^>]*>([^<\s]+)',
-            r'class="views-count"[^>]*>([^<]+)',
-            r'([\d,]+[km]?)\s*阅读',
+            r'class="[^"]*\bmeta-box\b[^"]*"[^>]*>.*?<span[^>]*class="[^"]*\bviews-count\b[^"]*"[^>]*>\s*([\d,]+(?:\.\d+)?[kKmMwW]?)\s*</span>',
         ],
         'parse_method': 'number_with_suffix',
     },
@@ -101,6 +97,14 @@ PLATFORM_EXTRACTORS = {
             r'SOHU_PV_COUNT:(\d+)',
             r'阅读\s*\(\s*(\d+)\s*\)',
             r'>(\d+)</em>',
+        ],
+        'parse_method': 'number',
+    },
+    'eet_china': {
+        'wait_for': 'css:span.hidden-xs.detail-view-num',
+        'patterns': [
+            r'<span[^>]*class="[^"]*\bdetail-view-num\b[^"]*"[^>]*>\s*([\d,]+)\s*浏览\s*</span>',
+            r'<span[^>]*class="[^"]*\bdetail-view-num\b[^"]*"[^>]*>\s*([\d,]+)\s*</span>',
         ],
         'parse_method': 'number',
     },

@@ -1,5 +1,28 @@
 import pytest
 
+from monitor.url_utils import validate_and_normalize_url
+
+
+def test_validate_and_normalize_url_rejects_localhost():
+    ok, normalized, site = validate_and_normalize_url("http://localhost:5001/api")
+    assert ok is False
+    assert site is None
+
+
+def test_validate_and_normalize_url_rejects_private_ip():
+    ok, normalized, site = validate_and_normalize_url("http://127.0.0.1:5001/")
+    assert ok is False
+    assert site is None
+
+
+def test_validate_and_normalize_url_does_not_match_domain_substring_attack():
+    # Should not detect as juejin: hostname contains 'juejin.cn' but is not a valid suffix match.
+    ok, normalized, site = validate_and_normalize_url("https://juejin.cn.evil.com/post/1")
+    assert ok is True
+    assert site is None
+
+import pytest
+
 from monitor.url_utils import normalize_url, validate_url, validate_and_normalize_url
 from monitor.config import SUPPORTED_SITES
 
@@ -42,6 +65,15 @@ def test_validate_and_normalize_url_detects_supported_site():
     assert is_valid is True
     assert normalized == url  # 已是標準格式，應不變
     assert site == juejin_site_name
+
+
+def test_validate_and_normalize_url_detects_eet_china_subdomain():
+    url = "https://www.eet-china.com/mp/a480306.html"
+    is_valid, normalized, site = validate_and_normalize_url(url)
+
+    assert is_valid is True
+    assert normalized == url
+    assert site == "eet_china"
 
 
 def test_validate_and_normalize_url_empty_string():

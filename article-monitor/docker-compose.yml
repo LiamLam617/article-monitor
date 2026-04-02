@@ -29,22 +29,8 @@ services:
       - FLASK_HOST=0.0.0.0
       - FLASK_PORT=5000
       - FLASK_DEBUG=false
-      # 2C2G 低資源模式（並發 2、瀏覽器池 2、SQLite 2MB、健康檢查 4 線程）。主機 ≥3GB 可改為 RESOURCE_PROFILE= 或註解此行
+      # 2C2G 低資源模式（主機 ≥3GB 可註解此行）
       - RESOURCE_PROFILE=low
-      # 爬取配置（RESOURCE_PROFILE=low 時 CRAWL_CONCURRENCY 預設為 2，可覆寫）
-      - CRAWL_INTERVAL_HOURS=6
-      - CRAWL_CONCURRENCY=2
-      - CRAWL_DELAY=1.0
-      - CRAWL_MAX_RETRIES=10
-      - CRAWL_RETRY_DELAY=2.0
-      - CRAWL_RETRY_BACKOFF=1.5
-      # 防反爬配置
-      - ANTI_SCRAPING_ENABLED=true
-      - ANTI_SCRAPING_ROTATE_UA=true
-      - ANTI_SCRAPING_RANDOM_DELAY=true
-      - ANTI_SCRAPING_STEALTH_MODE=true
-      - ANTI_SCRAPING_MIN_DELAY=1.0
-      - ANTI_SCRAPING_MAX_DELAY=5.0
       # 平台白名单（可选，留空则爬取所有支持的平台）
       # - ALLOWED_PLATFORMS=juejin,csdn,cnblogs
     

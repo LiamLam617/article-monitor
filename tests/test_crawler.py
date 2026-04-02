@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import monitor.crawler as crawler_module
+from monitor.logging_context import set_log_context, reset_log_context
 from monitor.crawler import (
     ErrorCategory,
     _get_error_category,
@@ -249,6 +250,62 @@ def test_crawl_article_with_retry_extract_fails_marks_error(monkeypatch):
 
     assert result is False
     assert any(c[1] == "ERROR" and "无法提取阅读数" in (c[2] or "") for c in update_status_calls)
+
+
+def test_crawl_article_with_retry_logs_extract_success(monkeypatch, caplog):
+    article = {"id": 1, "url": "https://juejin.cn/post/1", "site": "juejin", "title": "Old", "_latest_count": None}
+
+    async def fake_extract(url, c):
+        return {"read_count": 88, "title": "New Title"}
+
+    monkeypatch.setattr(crawler_module, "is_platform_allowed", lambda s: True)
+    monkeypatch.setattr(crawler_module, "extract_article_info", fake_extract)
+    monkeypatch.setattr(crawler_module, "add_read_count", lambda aid, count: None)
+    monkeypatch.setattr(crawler_module, "update_article_status", lambda aid, status, error=None: None)
+    monkeypatch.setattr(crawler_module, "update_article_title", lambda aid, title: True)
+    monkeypatch.setattr(crawler_module, "get_latest_read_count", lambda aid: None)
+
+    caplog.set_level("INFO", logger="monitor.crawler")
+    token = set_log_context(crawl_id="crawl-test-id")
+    try:
+        result = run_async(crawl_article_with_retry(article, skip_retry=True))
+    finally:
+        reset_log_context(token)
+
+    assert result is True
+    assert any(
+        getattr(r, "event", "") == "crawl.extract_result"
+        and getattr(r, "status", "") == "success"
+        and getattr(r, "read_count", "") == 88
+        and getattr(r, "crawl_id", "") == "crawl-test-id"
+        and getattr(r, "article_id", "") == 1
+        and getattr(r, "platform", "") == "juejin"
+        for r in caplog.records
+    )
+
+
+def test_crawl_article_with_retry_logs_extract_failure(monkeypatch, caplog):
+    article = {"id": 1, "url": "https://juejin.cn/post/1", "site": "juejin", "title": "Old", "_latest_count": None}
+
+    async def fake_extract(url, c):
+        return {"read_count": None, "title": None}
+
+    monkeypatch.setattr(crawler_module, "is_platform_allowed", lambda s: True)
+    monkeypatch.setattr(crawler_module, "extract_article_info", fake_extract)
+    monkeypatch.setattr(crawler_module, "update_article_status", lambda aid, status, error=None: None)
+    monkeypatch.setattr(crawler_module, "get_latest_read_count", lambda aid: None)
+    monkeypatch.setattr(crawler_module, "CRAWL_RETRY_PARSE_MAX", 0)
+
+    caplog.set_level("INFO", logger="monitor.crawler")
+    result = run_async(crawl_article_with_retry(article, skip_retry=False, max_retries=0))
+
+    assert result is False
+    assert any(
+        getattr(r, "event", "") == "crawl.extract_result"
+        and getattr(r, "status", "") == "parse_failed"
+        and getattr(r, "read_count", "") is None
+        for r in caplog.records
+    )
 
 
 def test_crawl_article_with_retry_permanent_error_no_retry(monkeypatch):

@@ -133,6 +133,62 @@ def test_sync_from_bitable_crawl_failure_writes_error(monkeypatch):
     assert "平台不允许" in err_fields["失败原因"]
 
 
+def test_sync_from_bitable_retries_parse_failed_and_succeeds(monkeypatch):
+    """Integration-ish: use real article_service retry logic via bitable_sync.crawl_urls_for_results."""
+    monkeypatch.setattr(bitable_sync, "FEISHU_APP_ID", "id")
+    monkeypatch.setattr(bitable_sync, "FEISHU_APP_SECRET", "sec")
+
+    records = [{"record_id": "r1", "fields": {"发布链接": "https://juejin.cn/post/retry"}}]
+    monkeypatch.setattr(bitable_sync, "list_all_bitable_records", lambda *a, **k: records)
+
+    updates = []
+
+    def capture_batch_update(app_token, table_id, records, **kwargs):
+        for record_id, fields in records:
+            updates.append({"record_id": record_id, "fields": dict(fields)})
+
+    monkeypatch.setattr(bitable_sync, "batch_update_bitable_records", capture_batch_update)
+
+    # Patch monitor.article_service dependencies, but keep the real crawl_urls_for_results function.
+    import monitor.article_service as article_service
+
+    attempt = {"n": 0}
+
+    async def fake_extract(url, crawler):
+        attempt["n"] += 1
+        if attempt["n"] == 1:
+            return {"title": "t", "read_count": None}
+        return {"title": "t", "read_count": 123}
+
+    class DummyCrawler:
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummyBrowserPool:
+        async def acquire(self):
+            return DummyCrawler()
+
+        async def release(self, crawler):
+            return None
+
+    monkeypatch.setattr(article_service, "get_browser_pool", lambda: DummyBrowserPool())
+    monkeypatch.setattr(article_service, "extract_article_info", fake_extract)
+    monkeypatch.setattr(article_service, "create_shared_crawler", lambda: DummyCrawler())
+    monkeypatch.setattr(article_service, "validate_and_normalize_url", lambda u: (True, u, "juejin"))
+    monkeypatch.setattr(article_service, "is_platform_allowed", lambda s: True)
+    monkeypatch.setattr(article_service, "BATCH_PROCESS_SIZE", 50)
+    monkeypatch.setattr(article_service, "BATCH_PROCESS_CONCURRENCY", 3)
+    monkeypatch.setattr(article_service, "CRAWL_TIMEOUT", 2)
+
+    out = bitable_sync.sync_from_bitable(app_token="tok", table_id="tbl")
+    assert out["success"] is True
+    assert out["processed"] == 1
+    assert out["updated"] == 1
+    assert out["failed"] == 0
+    assert updates and updates[0]["fields"].get("总阅读量") == 123
+    assert updates[0]["fields"].get("失败原因") == ""
+
+
 def test_sync_from_bitable_writeback_failure_raises_runtime_error(monkeypatch):
     monkeypatch.setattr(bitable_sync, "FEISHU_APP_ID", "id")
     monkeypatch.setattr(bitable_sync, "FEISHU_APP_SECRET", "sec")

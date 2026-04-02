@@ -9,6 +9,7 @@ import psutil
 from .config import HEALTH_CHECK_TIMEOUT, MAX_HEALTH_CHECK_WORKERS, CRAWL_INTERVAL_HOURS, SUPPORTED_SITES
 from .database import get_platform_health, get_platform_failures, get_setting
 import logging
+from .logging_config import get_logging_stats
 
 
 logger = logging.getLogger(__name__)
@@ -170,6 +171,7 @@ def get_system_health_payload() -> Dict[str, Any]:
         'system': system_status,
         'platforms': platform_status,
         'network': network_status,
+        'logging': get_logging_stats(),
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     }
 

@@ -1,5 +1,6 @@
 from urllib.parse import urlparse
 from typing import Optional
+import ipaddress
 
 from .config import SUPPORTED_SITES
 import logging
@@ -32,6 +33,27 @@ def validate_url(url: str) -> bool:
         # 檢查域名是否為空
         if not parsed.netloc:
             return False
+        hostname = (parsed.hostname or "").strip().lower()
+        if not hostname:
+            return False
+        # 基礎 SSRF 防護：阻擋 localhost / 本機域
+        if hostname in ("localhost",) or hostname.endswith(".local"):
+            return False
+        # 若為字面 IP，阻擋私有/loopback/link-local/保留等
+        try:
+            ip = ipaddress.ip_address(hostname)
+        except ValueError:
+            ip = None
+        if ip is not None:
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+                or ip.is_unspecified
+            ):
+                return False
         # 基本格式檢查通過
         return True
     except (ValueError, AttributeError):
@@ -60,10 +82,11 @@ def validate_and_normalize_url(url: str) -> tuple[bool, str, Optional[str]]:
     
     try:
         parsed = urlparse(url)
-        domain = parsed.netloc.lower()
+        hostname = (parsed.hostname or "").lower()
         site = None
         for site_domain, site_name in SUPPORTED_SITES.items():
-            if site_domain in domain:
+            # 嚴格匹配：hostname == domain 或為其子域名
+            if hostname == site_domain or hostname.endswith(f".{site_domain}"):
                 site = site_name
                 break
         return True, url, site

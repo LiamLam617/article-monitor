@@ -161,6 +161,66 @@ def test_crawl_single_url_for_result_success(monkeypatch):
     assert result["data"]["site"] == "juejin"
 
 
+def test_crawl_single_url_for_result_parse_failed_when_read_count_none(monkeypatch):
+    dummy_pool = DummyBrowserPool()
+
+    async def fake_extract(url, crawler):
+        return {"title": "ok", "read_count": None}
+
+    monkeypatch.setattr(article_service, "get_browser_pool", lambda: dummy_pool)
+    monkeypatch.setattr(article_service, "extract_article_info", fake_extract)
+    monkeypatch.setattr(article_service, "create_shared_crawler", lambda: DummyCrawler())
+    monkeypatch.setattr(article_service, "validate_and_normalize_url", lambda u: (True, u, "juejin"))
+    monkeypatch.setattr(article_service, "is_platform_allowed", lambda s: True)
+
+    result = run(article_service.crawl_single_url_for_result("https://juejin.cn/post/1"))
+    assert result["success"] is False
+    assert result["error_code"] == "parse_failed"
+
+
+def test_crawl_urls_for_results_retries_retryable_failures_once(monkeypatch):
+    calls = {}
+
+    async def fake_crawl_single(url, browser_pool=None, domain_controller=None):
+        calls[url] = calls.get(url, 0) + 1
+        if "post/retry" in url and calls[url] == 1:
+            return {"url": url, "success": False, "error": "无法提取阅读数", "error_code": "parse_failed"}
+        return {"url": url, "success": True, "data": {"title": None, "site": "juejin", "read_count": 9}}
+
+    monkeypatch.setattr(article_service, "crawl_single_url_for_result", fake_crawl_single)
+    monkeypatch.setattr(article_service, "BATCH_PROCESS_SIZE", 50)
+    monkeypatch.setattr(article_service, "BATCH_PROCESS_CONCURRENCY", 5)
+
+    urls = ["https://juejin.cn/post/ok", "https://juejin.cn/post/retry"]
+    results = run(article_service.crawl_urls_for_results(urls))
+    assert len(results) == 2
+    assert results[0]["success"] is True
+    assert results[1]["success"] is True
+    assert calls["https://juejin.cn/post/retry"] == 2
+
+
+def test_crawl_urls_for_results_does_not_retry_when_extra_passes_zero(monkeypatch):
+    calls = {}
+
+    async def fake_crawl_single(url, browser_pool=None, domain_controller=None):
+        calls[url] = calls.get(url, 0) + 1
+        if "post/retry" in url:
+            return {"url": url, "success": False, "error": "无法提取阅读数", "error_code": "parse_failed"}
+        return {"url": url, "success": True, "data": {"title": None, "site": "juejin", "read_count": 9}}
+
+    monkeypatch.setattr(article_service, "crawl_single_url_for_result", fake_crawl_single)
+    monkeypatch.setattr(article_service, "BATCH_PROCESS_SIZE", 50)
+    monkeypatch.setattr(article_service, "BATCH_PROCESS_CONCURRENCY", 5)
+    monkeypatch.setattr(article_service, "RESULT_RETRY_EXTRA_PASSES", 0)
+
+    urls = ["https://juejin.cn/post/ok", "https://juejin.cn/post/retry"]
+    results = run(article_service.crawl_urls_for_results(urls))
+    assert len(results) == 2
+    assert results[0]["success"] is True
+    assert results[1]["success"] is False
+    assert calls["https://juejin.cn/post/retry"] == 1
+
+
 def test_crawl_urls_for_results_respects_domain_min_delay(monkeypatch):
     dummy_pool = DummyBrowserPool()
     call_times = []

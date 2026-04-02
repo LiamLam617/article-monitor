@@ -291,7 +291,12 @@ class BitableSyncService:
                         "last_error": payload.get("error") if not payload.get("success") else None,
                     })
 
-            crawl_results = loop.run_until_complete(crawl_urls_for_results(dedup_urls, on_result=_on_crawl_result))
+            try:
+                crawl_results = loop.run_until_complete(
+                    crawl_urls_for_results(dedup_urls, on_result=_on_crawl_result)
+                )
+            except TypeError:
+                crawl_results = loop.run_until_complete(crawl_urls_for_results(dedup_urls))
         finally:
             loop.close()
 
@@ -472,11 +477,14 @@ class BitableSyncService:
                         except Exception:
                             logger.warning("shared pool progress callback failed", exc_info=True)
 
-                out = self.sync_multiple_tables(
-                    sources,
-                    max_concurrency=1,
-                    progress_callback=_batch_progress,
-                )
+                try:
+                    out = self.sync_multiple_tables(
+                        sources,
+                        max_concurrency=1,
+                        progress_callback=_batch_progress,
+                    )
+                except TypeError:
+                    out = self.sync_multiple_tables(sources, max_concurrency=1)
                 table_results = out.get("tables") or []
             except Exception as exc:
                 logger.exception("共享同步池批处理失败")

@@ -1,13 +1,15 @@
 """
 Flask应用 - 简单的RESTful API和前端
 """
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, g
 from flask_cors import CORS
 import asyncio
 import time
 import threading
 import hashlib
+from uuid import uuid4
 from typing import Optional
+from werkzeug.exceptions import HTTPException
 from .database import (
     init_db, add_article, get_all_articles_with_latest_count,
     get_read_counts, delete_article, get_setting, set_setting,
@@ -15,12 +17,17 @@ from .database import (
 )
 import logging
 
-logger = logging.getLogger(__name__)
 from .scheduler import start_scheduler
 from .config import (
     FLASK_HOST, FLASK_PORT, FLASK_DEBUG, CRAWL_INTERVAL_HOURS,
     FEISHU_BITABLE_APP_TOKEN, FEISHU_BITABLE_TABLE_ID,
     is_platform_allowed,
+)
+logger = logging.getLogger(__name__)
+from .logging_context import (
+    set_log_context,
+    reset_log_context,
+    run_with_current_log_context,
 )
 
 # Rate limit: min seconds between POST /api/bitable/sync calls (per app_token + table_id)
@@ -66,6 +73,85 @@ from .health_service import get_system_health_payload
 app = Flask(__name__)
 CORS(app)
 
+_REQUEST_ID_PATTERN = r"^[A-Za-z0-9._:-]{8,64}$"
+
+
+def _valid_external_request_id(value: str) -> bool:
+    if not value:
+        return False
+    import re
+
+    return re.match(_REQUEST_ID_PATTERN, value) is not None
+
+
+def _log_api_event(event: str, **fields):
+    logger.info(event, extra={"event": event, **fields})
+
+
+@app.before_request
+def _before_request_logging():
+    g.request_started_monotonic = time.monotonic()
+    raw_external = (request.headers.get("X-Request-ID") or "").strip()
+    internal_request_id = str(uuid4())
+    request_id_source = "generated"
+    external_request_id = None
+    if raw_external:
+        if _valid_external_request_id(raw_external):
+            external_request_id = raw_external
+            request_id_source = "client_valid"
+        else:
+            request_id_source = "client_rejected"
+
+    g.internal_request_id = internal_request_id
+    g.external_request_id = external_request_id
+    g.request_id_source = request_id_source
+    g.log_context_token = set_log_context(
+        internal_request_id=internal_request_id,
+        external_request_id=external_request_id,
+        request_id_source=request_id_source,
+    )
+    _log_api_event(
+        "http.request.started",
+        method=request.method,
+        path=request.path,
+        schema_version="1.0",
+    )
+
+
+@app.after_request
+def _after_request_logging(response):
+    start = getattr(g, "request_started_monotonic", None)
+    duration_ms = None
+    if start is not None:
+        duration_ms = max(0.0, (time.monotonic() - start) * 1000)
+
+    response.headers["X-Request-ID"] = getattr(g, "internal_request_id", "")
+    _log_api_event(
+        "http.request.completed",
+        method=request.method,
+        path=request.path,
+        status_code=response.status_code,
+        duration_ms=round(duration_ms, 3) if duration_ms is not None else None,
+        request_id_source=getattr(g, "request_id_source", None),
+        schema_version="1.0",
+    )
+    return response
+
+
+@app.teardown_request
+def _teardown_request_logging(exc):
+    if exc is not None:
+        _log_api_event(
+            "http.request.failed",
+            method=request.method,
+            path=request.path,
+            error_type=type(exc).__name__,
+            schema_version="1.0",
+        )
+    token = getattr(g, "log_context_token", None)
+    if token is not None:
+        reset_log_context(token)
+
 # 初始化数据库
 init_db()
 
@@ -79,6 +165,24 @@ def api_success(data=None, status_code: int = 200):
 
 def api_error(message: str, status_code: int = 400):
     return jsonify({'success': False, 'error': message}), status_code
+
+
+@app.errorhandler(Exception)
+def _handle_unexpected_exception(exc: Exception):
+    """Fail-safe error handler: avoid leaking internals; log with correlation ids."""
+    if isinstance(exc, HTTPException):
+        return exc
+    logger.exception(
+        "http.request.exception",
+        extra={
+            "event": "http.request.exception",
+            "schema_version": "1.0",
+            "method": request.method if request else None,
+            "path": request.path if request else None,
+            "error_type": type(exc).__name__,
+        },
+    )
+    return api_error("服务器内部错误，请稍后重试", 500)
 
 @app.route('/')
 def index():
@@ -191,7 +295,7 @@ def remove_article(article_id):
         return api_error(f'參數錯誤: {str(e)}', 400)
     except Exception as e:
         logger.error(f"刪除文章失敗: {e}", exc_info=True)
-        return api_error(str(e), 500)
+        return api_error('服务器内部错误，请稍后重试', 500)
 
 @app.route('/api/articles/<int:article_id>/history', methods=['GET'])
 def get_history(article_id):
@@ -223,9 +327,8 @@ def get_history(article_id):
             'site': article.get('site', '')
         })
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
+        logger.exception("history request failed", extra={"event": "api.history.failed"})
+        return api_error('服务器内部错误，请稍后重试', 500)
 
 @app.route('/api/crawl', methods=['POST'])
 def manual_crawl():
@@ -234,7 +337,7 @@ def manual_crawl():
         from .crawler import crawl_all_sync
         # 在后台执行
         import threading
-        thread = threading.Thread(target=crawl_all_sync)
+        thread = threading.Thread(target=lambda: run_with_current_log_context(crawl_all_sync))
         thread.start()
         return jsonify({'success': True, 'message': '爬取任务已启动'})
     except Exception as e:
@@ -353,9 +456,8 @@ def get_statistics():
             }
         })
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
+        logger.exception("statistics request failed", extra={"event": "api.statistics.failed"})
+        return api_error('服务器内部错误，请稍后重试', 500)
 
 @app.route('/api/crawl/progress', methods=['GET'])
 def get_crawl_progress():
@@ -440,7 +542,7 @@ def retry_failure(article_id):
         
         # 在后台执行爬取
         import threading
-        thread = threading.Thread(target=lambda: crawl_all_sync())
+        thread = threading.Thread(target=lambda: run_with_current_log_context(crawl_all_sync))
         thread.start()
         
         return jsonify({
@@ -474,9 +576,8 @@ def export_csv():
         )
         
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
+        logger.exception("export csv failed", extra={"event": "api.export_csv.failed"})
+        return api_error('服务器内部错误，请稍后重试', 500)
 
 @app.route('/api/export/all-csv', methods=['GET'])
 def export_all_csv():
@@ -497,9 +598,8 @@ def export_all_csv():
         )
         
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
+        logger.exception("export all csv failed", extra={"event": "api.export_all_csv.failed"})
+        return api_error('服务器内部错误，请稍后重试', 500)
 
 async def _run_bitable_sync_async(
     task_id: str,
@@ -620,10 +720,9 @@ def get_system_health():
             'data': payload
         })
         
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
+    except Exception:
+        logger.exception("health failed", extra={"event": "api.health.failed"})
+        return api_error('服务器内部错误，请稍后重试', 500)
 
 if __name__ == '__main__':
     # 启动定时任务

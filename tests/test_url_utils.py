@@ -1,6 +1,11 @@
 import pytest
 
-from monitor.url_utils import validate_and_normalize_url
+from monitor.config import SUPPORTED_SITES
+from monitor.url_utils import (
+    normalize_url,
+    validate_url,
+    validate_and_normalize_url,
+)
 
 
 def test_validate_and_normalize_url_rejects_localhost():
@@ -20,11 +25,6 @@ def test_validate_and_normalize_url_does_not_match_domain_substring_attack():
     ok, normalized, site = validate_and_normalize_url("https://juejin.cn.evil.com/post/1")
     assert ok is True
     assert site is None
-
-import pytest
-
-from monitor.url_utils import normalize_url, validate_url, validate_and_normalize_url
-from monitor.config import SUPPORTED_SITES
 
 
 def test_normalize_url_juejin_spost_to_post():

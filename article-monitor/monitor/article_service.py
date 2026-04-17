@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
-from typing import List, Dict
+from enum import Enum
+from typing import List, Dict, Optional
 from urllib.parse import urlparse
 
 from .config import (
@@ -14,6 +16,14 @@ from .config import (
     CRAWL_MIN_DELAY_PER_DOMAIN,
     RESULT_RETRY_EXTRA_PASSES,
     is_platform_allowed,
+    CRAWL_RETRY_DELAY,
+    CRAWL_RETRY_BACKOFF,
+    CRAWL_RETRY_MAX_DELAY,
+    CRAWL_RETRY_JITTER,
+    CRAWL_RETRY_SSL_DELAY,
+    CRAWL_RETRY_NETWORK_MAX,
+    CRAWL_RETRY_PARSE_MAX,
+    CRAWL_RETRY_SSL_MAX,
 )
 from .task_manager import get_task_manager
 from .browser_pool import get_browser_pool
@@ -25,24 +35,269 @@ from .url_utils import validate_and_normalize_url
 
 logger = logging.getLogger(__name__)
 
+
+class ErrorCategory(Enum):
+    """错误分类枚举"""
+
+    NETWORK = "network"
+    PARSE = "parse"
+    SSL = "ssl"
+    PERMANENT = "permanent"
+    UNKNOWN = "unknown"
+
+
+def _get_error_category(error: Exception) -> ErrorCategory:
+    """智能错误分类"""
+    error_str = str(error).lower()
+
+    permanent_keywords = ["404", "not found", "403", "forbidden", "401", "unauthorized"]
+    if any(keyword in error_str for keyword in permanent_keywords):
+        return ErrorCategory.PERMANENT
+
+    ssl_keywords = ["ssl", "certificate", "handshake", "tls", "cert"]
+    if any(keyword in error_str for keyword in ssl_keywords):
+        return ErrorCategory.SSL
+
+    network_keywords = [
+        "timeout",
+        "connection",
+        "network",
+        "temporary",
+        "503",
+        "502",
+        "504",
+        "429",
+        "econnrefused",
+        "econnreset",
+        "etimedout",
+        "connection refused",
+        "connection reset",
+        "connection aborted",
+        "name resolution",
+        "dns",
+    ]
+    if any(keyword in error_str for keyword in network_keywords):
+        return ErrorCategory.NETWORK
+
+    parse_keywords = [
+        "extract",
+        "parse",
+        "selector",
+        "element not found",
+        "no such element",
+    ]
+    if any(keyword in error_str for keyword in parse_keywords):
+        return ErrorCategory.PARSE
+
+    return ErrorCategory.UNKNOWN
+
+
+def _calculate_retry_delay(error_category: ErrorCategory, attempt: int) -> float:
+    """计算重试延迟"""
+    if error_category == ErrorCategory.SSL:
+        base_delay = CRAWL_RETRY_SSL_DELAY
+    elif error_category == ErrorCategory.PARSE:
+        base_delay = CRAWL_RETRY_DELAY * attempt
+    else:
+        base_delay = CRAWL_RETRY_DELAY * (CRAWL_RETRY_BACKOFF ** (attempt - 1))
+
+    delay = min(base_delay, CRAWL_RETRY_MAX_DELAY)
+
+    if CRAWL_RETRY_JITTER:
+        jitter = random.uniform(-0.1 * delay, 0.1 * delay)
+        delay = max(0.1, delay + jitter)
+
+    return delay
+
+
+def _get_max_retries_for_category(error_category: ErrorCategory) -> int:
+    """根据错误类型获取最大重试次数"""
+    if error_category in (ErrorCategory.NETWORK, ErrorCategory.UNKNOWN):
+        return CRAWL_RETRY_NETWORK_MAX
+    elif error_category == ErrorCategory.PARSE:
+        return CRAWL_RETRY_PARSE_MAX
+    elif error_category == ErrorCategory.SSL:
+        return CRAWL_RETRY_SSL_MAX
+    return 0
+
+
+def _get_retry_priority(error_category: ErrorCategory) -> int:
+    """获取重试优先级（数字越小优先级越高）"""
+    priority_map = {
+        ErrorCategory.NETWORK: 1,
+        ErrorCategory.UNKNOWN: 1,
+        ErrorCategory.PARSE: 2,
+        ErrorCategory.SSL: 3,
+        ErrorCategory.PERMANENT: 4,
+    }
+    return priority_map.get(error_category, 5)
+
+
+async def _crawl_single_with_retry(
+    url: str,
+    browser_pool,
+    domain_controller: _DomainThrottleController,
+) -> Dict:
+    """带重试机制的单URL爬取"""
+    raw_url = url
+    normalized_url = url
+    attempt = 0
+
+    try:
+        is_valid, normalized_url, site = validate_and_normalize_url(url)
+        if not is_valid:
+            return {
+                "url": raw_url,
+                "success": False,
+                "error": "无效的URL格式（只支持 http/https）",
+                "error_code": "invalid_url",
+            }
+
+        if not is_platform_allowed(site or ""):
+            return {
+                "url": raw_url,
+                "success": False,
+                "error": f'平台 "{site or "未知"}" 不在允许列表中，已跳过',
+                "error_code": "platform_not_allowed",
+            }
+
+        # 微信文章暂不支持
+        if site and ("weixin" in site or "qq.com" in site):
+            logger.info("跳过：微信文章正在开发中")
+            return {
+                "url": raw_url,
+                "success": False,
+                "error": "微信文章正在开发中",
+                "error_code": "weixin_not_supported",
+            }
+
+        while True:
+            try:
+                crawler = await browser_pool.acquire()
+                if not crawler:
+                    crawler = await create_shared_crawler()
+                    use_pool = False
+                else:
+                    use_pool = True
+
+                try:
+                    info = await extract_article_info(normalized_url, crawler)
+                    title = info.get("title")
+                    count = info.get("read_count")
+                finally:
+                    if use_pool:
+                        await browser_pool.release(crawler)
+                    else:
+                        await crawler.__aexit__(None, None, None)
+
+                if count is None:
+                    return {
+                        "url": raw_url,
+                        "success": False,
+                        "error": "无法提取阅读数",
+                        "error_code": "parse_failed",
+                    }
+                logger.info("更新成功，阅读数: %s", count)
+                return {
+                    "url": normalized_url,
+                    "success": True,
+                    "data": {
+                        "title": title,
+                        "site": site,
+                        "read_count": count,
+                    },
+                }
+            except Exception as e:
+                error_category = _get_error_category(e)
+
+                if error_category == ErrorCategory.PERMANENT:
+                    logger.error("永久性错误（不重试）")
+                    return {
+                        "url": raw_url,
+                        "success": False,
+                        "error": str(e)[:200],
+                        "error_code": "crawl_failed",
+                    }
+
+                max_retries = _get_max_retries_for_category(error_category)
+                if attempt >= max_retries:
+                    logger.error("爬取失败: %s", error_category.value)
+                    return {
+                        "url": raw_url,
+                        "success": False,
+                        "error": str(e)[:200],
+                        "error_code": "crawl_failed",
+                    }
+
+                attempt += 1
+                delay = _calculate_retry_delay(error_category, attempt)
+                logger.info("重试 %s/%s", attempt, max_retries)
+                await asyncio.sleep(delay)
+
+    except Exception as e:
+        return {
+            "url": normalized_url,
+            "success": False,
+            "error": str(e)[:200],
+            "error_code": "crawl_failed",
+        }
+
+
+async def _crawl_batch_with_retry(
+    urls: List[str],
+    browser_pool,
+    domain_controller: _DomainThrottleController,
+    on_result=None,
+) -> List[Optional[Dict]]:
+    """带重试的批量爬取"""
+    results: List[Optional[Dict]] = [None] * len(urls)
+
+    semaphore = asyncio.Semaphore(BATCH_PROCESS_CONCURRENCY)
+
+    async def process_with_semaphore(idx: int, url: str):
+        async with semaphore:
+            result = await _crawl_single_with_retry(
+                url,
+                browser_pool,
+                domain_controller,
+            )
+            if on_result and result:
+                try:
+                    on_result(result)
+                except Exception:
+                    logger.debug("on_result callback failed", exc_info=True)
+            return idx, result
+
+    tasks = [
+        asyncio.create_task(process_with_semaphore(i, url))
+        for i, url in enumerate(urls)
+    ]
+    for completed in asyncio.as_completed(tasks):
+        idx, result = await completed
+        results[idx] = result
+
+    return results
+
+
 async def _merge_retry_passes(
     *,
     urls: List[str],
-    all_results: List[Dict],
+    all_results: List[Optional[Dict]],
     extra_passes: int,
     batch_size: int,
     browser_pool,
     domain_controller: _DomainThrottleController,
     on_result=None,
-) -> List[Dict]:
-    """Retry failed items for a limited number of additional passes.
+) -> List[Optional[Dict]]:
+    """重试失败的文章（使用 crawler.py 相同的重试机制）
 
-    Returns a new results list with retry payloads applied by index (never reorders).
+    收集失败的文章，按错误类型排序后集中重试。
     """
-    current_results = list(all_results)
+    current_results: List[Optional[Dict]] = list(all_results)
+
     for _pass in range(int(extra_passes)):
-        retry_urls: List[str] = []
-        retry_indexes: List[int] = []
+        # 收集可重试的失败项
+        failed_items: List[tuple] = []
         for idx, result in enumerate(current_results):
             if not isinstance(result, dict):
                 continue
@@ -50,32 +305,36 @@ async def _merge_retry_passes(
                 continue
             code = result.get("error_code")
             if code in RESULT_RETRYABLE_ERROR_CODES:
-                retry_indexes.append(idx)
-                retry_urls.append(result.get("url") or urls[idx])
+                url = result.get("url") or urls[idx]
+                error_category = ErrorCategory.UNKNOWN
+                if code == "crawl_timeout":
+                    error_category = ErrorCategory.NETWORK
+                elif code == "parse_failed":
+                    error_category = ErrorCategory.PARSE
+                failed_items.append((idx, url, error_category))
 
-        if not retry_urls:
+        if not failed_items:
             break
 
-        retry_results: List[Dict] = []
-        for i in range(0, len(retry_urls), batch_size):
-            batch_urls = retry_urls[i : i + batch_size]
-            batch_results = await _crawl_batch_for_results(
-                batch_urls,
-                browser_pool,
-                domain_controller,
-                on_result=on_result,
-            )
-            retry_results.extend(batch_results)
+        # 按错误类型排序（优先级高的先重试）
+        failed_items.sort(key=lambda x: _get_retry_priority(x[2]))
 
-        retry_map = {
-            idx: payload
-            for idx, payload in zip(retry_indexes, retry_results)
-            if isinstance(payload, dict)
-        }
-        if retry_map:
-            current_results = [
-                retry_map.get(idx, existing) for idx, existing in enumerate(current_results)
-            ]
+        failed_urls = [item[1] for item in failed_items]
+        logger.info("开始集中重试 %s 篇文章", len(failed_urls))
+
+        # 集中重试
+        retry_results = await _crawl_batch_for_results(
+            failed_urls,
+            browser_pool,
+            domain_controller,
+            on_result=on_result,
+        )
+
+        # 更新结果
+        for i, (original_idx, _url, _error_category) in enumerate(failed_items):
+            if i < len(retry_results) and retry_results[i]:
+                current_results[original_idx] = retry_results[i]
+
     return current_results
 
 
@@ -100,7 +359,9 @@ class _DomainThrottleController:
         domain = self._domain(url)
         async with self._lock:
             if domain not in self._semaphores:
-                self._semaphores[domain] = asyncio.Semaphore(CRAWL_CONCURRENCY_PER_DOMAIN)
+                self._semaphores[domain] = asyncio.Semaphore(
+                    CRAWL_CONCURRENCY_PER_DOMAIN
+                )
             return self._semaphores[domain]
 
     async def wait_turn(self, url: str):
@@ -125,27 +386,30 @@ class _DomainThrottleController:
 async def _process_urls_async(task_id: str, urls: List[str]):
     """异步处理URL列表（用于任务队列）"""
     task_manager = get_task_manager()
-    results: List[Dict] = []
+    results: List[Optional[Dict]] = []
     total = len(urls)
 
     browser_pool = get_browser_pool()
 
     batch_size = BATCH_PROCESS_SIZE
     for i in range(0, total, batch_size):
-        batch_urls = urls[i:i + batch_size]
+        batch_urls = urls[i : i + batch_size]
         batch_results = await _process_batch(batch_urls, browser_pool)
         results.extend(batch_results)
 
-        task_manager.update_task_progress(task_id, {
-            'processed': len(results),
-            'total': total,
-            'success': sum(1 for r in results if r.get('success')),
-            'failed': sum(1 for r in results if not r.get('success'))
-        })
+        task_manager.update_task_progress(
+            task_id,
+            {
+                "processed": len(results),
+                "total": total,
+                "success": sum(1 for r in results if r and r.get("success")),
+                "failed": sum(1 for r in results if not (r and r.get("success"))),
+            },
+        )
 
     task = task_manager.get_task(task_id)
     if task:
-        task['results'] = results
+        task["results"] = results
 
 
 async def _process_urls_sync(urls: List[str]):
@@ -154,10 +418,16 @@ async def _process_urls_sync(urls: List[str]):
     return await _process_batch(urls, browser_pool)
 
 
-async def crawl_urls_for_results(urls: List[str], on_result=None) -> List[Dict]:
+async def crawl_urls_for_results(
+    urls: List[str], on_result=None
+) -> List[Optional[Dict]]:
     """仅爬取 URL 列表并返回结构化结果，不写入数据库。
 
     供 Bitable 同步等仅需「爬取结果」的场景复用。
+
+    使用两轮重试机制：
+    - 第一轮：每篇文章带重试机制爬取
+    - 第二轮：集中重试第一轮失败的文章
 
     Returns:
         与 urls 顺序对应的列表，每项为:
@@ -166,8 +436,11 @@ async def crawl_urls_for_results(urls: List[str], on_result=None) -> List[Dict]:
     """
     browser_pool = get_browser_pool()
     batch_size = BATCH_PROCESS_SIZE
-    all_results: List[Dict] = []
+    all_results: List[Optional[Dict]] = []
     domain_controller = _DomainThrottleController()
+    logger.info("开始爬取 %s 篇文章", len(urls))
+
+    # 第一轮：批量爬取（保留 crawl_single_url_for_result 作为单次爬取入口，便于测试/复用）
     for i in range(0, len(urls), batch_size):
         batch_urls = urls[i : i + batch_size]
         batch_results = await _crawl_batch_for_results(
@@ -178,6 +451,7 @@ async def crawl_urls_for_results(urls: List[str], on_result=None) -> List[Dict]:
         )
         all_results.extend(batch_results)
 
+    # 第二轮：集中重试第一轮失败的文章
     all_results = await _merge_retry_passes(
         urls=urls,
         all_results=all_results,
@@ -187,13 +461,15 @@ async def crawl_urls_for_results(urls: List[str], on_result=None) -> List[Dict]:
         domain_controller=domain_controller,
         on_result=on_result,
     )
+    success_count = sum(1 for r in all_results if r and r.get("success"))
+    logger.info("爬取完成: %s/%s 成功", success_count, len(urls))
     return all_results
 
 
 async def crawl_single_url_for_result(
     url: str,
     browser_pool=None,
-    domain_controller: _DomainThrottleController = None,
+    domain_controller: Optional[_DomainThrottleController] = None,
 ) -> Dict:
     """爬取单个 URL，返回统一结果结构，不写库。"""
     raw_url = url
@@ -202,18 +478,27 @@ async def crawl_single_url_for_result(
         is_valid, normalized_url, site = validate_and_normalize_url(url)
         if not is_valid:
             return {
-                'url': raw_url,
-                'success': False,
-                'error': '无效的URL格式（只支持 http/https）',
-                'error_code': 'invalid_url',
+                "url": raw_url,
+                "success": False,
+                "error": "无效的URL格式（只支持 http/https）",
+                "error_code": "invalid_url",
             }
 
-        if not is_platform_allowed(site):
+        if not is_platform_allowed(site or ""):
             return {
-                'url': raw_url,
-                'success': False,
-                'error': f'平台 "{site or "未知"}" 不在允许列表中，已跳过',
-                'error_code': 'platform_not_allowed',
+                "url": raw_url,
+                "success": False,
+                "error": f'平台 "{site or "未知"}" 不在允许列表中，已跳过',
+                "error_code": "platform_not_allowed",
+            }
+
+        # 微信文章暂不支持
+        if site and ("weixin" in site or "qq.com" in site):
+            return {
+                "url": raw_url,
+                "success": False,
+                "error": "微信文章正在开发中",
+                "error_code": "weixin_not_supported",
             }
 
         if browser_pool is None:
@@ -237,10 +522,10 @@ async def crawl_single_url_for_result(
 
                 try:
                     info = await extract_article_info(normalized_url, crawler)
-                    title = info.get('title')
-                    count = info.get('read_count')
+                    title = info.get("title")
+                    count = info.get("read_count")
                 except Exception as e:
-                    logger.warning(f"爬取失败 {raw_url}: {e}")
+                    logger.warning("爬取失败")
                     title = None
                     count = None
                 finally:
@@ -253,22 +538,28 @@ async def crawl_single_url_for_result(
 
                 if count is None:
                     return {
-                        'url': raw_url,
-                        'success': False,
-                        'error': '无法提取阅读数',
-                        'error_code': 'parse_failed',
+                        "url": raw_url,
+                        "success": False,
+                        "error": "无法提取阅读数",
+                        "error_code": "parse_failed",
                     }
+                logger.info(f"更新成功，閱讀數: {count}")
                 return {
-                    'url': normalized_url,
-                    'success': True,
-                    'data': {
-                        'title': title,
-                        'site': site,
-                        'read_count': count,
+                    "url": normalized_url,
+                    "success": True,
+                    "data": {
+                        "title": title,
+                        "site": site,
+                        "read_count": count,
                     },
                 }
             except Exception as e:
-                return {'url': raw_url, 'success': False, 'error': str(e), 'error_code': 'crawl_failed'}
+                return {
+                    "url": raw_url,
+                    "success": False,
+                    "error": str(e),
+                    "error_code": "crawl_failed",
+                }
 
         async def _crawl_with_domain_limit() -> Dict:
             if domain_sem is not None:
@@ -278,27 +569,34 @@ async def crawl_single_url_for_result(
 
         timeout_seconds = max(0.1, float(CRAWL_TIMEOUT))
         try:
-            return await asyncio.wait_for(_crawl_with_domain_limit(), timeout=timeout_seconds)
+            return await asyncio.wait_for(
+                _crawl_with_domain_limit(), timeout=timeout_seconds
+            )
         except asyncio.TimeoutError:
-            logger.warning("爬取超时 %s (timeout=%ss)", raw_url, timeout_seconds)
+            logger.warning("爬取超时")
             return {
-                'url': raw_url,
-                'success': False,
-                'error': f'爬取超时（>{timeout_seconds}秒）',
-                'error_code': 'crawl_timeout',
+                "url": raw_url,
+                "success": False,
+                "error": f"爬取超时（>{timeout_seconds}秒）",
+                "error_code": "crawl_timeout",
             }
     except Exception as e:
-        return {'url': normalized_url, 'success': False, 'error': str(e), 'error_code': 'crawl_failed'}
+        return {
+            "url": normalized_url,
+            "success": False,
+            "error": str(e),
+            "error_code": "crawl_failed",
+        }
 
 
 async def _crawl_batch_for_results(
     urls: List[str],
     browser_pool,
-    domain_controller: _DomainThrottleController = None,
+    domain_controller: Optional[_DomainThrottleController] = None,
     on_result=None,
-) -> List[dict]:
+) -> List[Optional[dict]]:
     """爬取一批 URL，返回结果列表，不写库。"""
-    processed_results: List[dict] = [None] * len(urls)
+    processed_results: List[Optional[dict]] = [None] * len(urls)
 
     async def process_single_url(idx: int, url: str):
         result = await crawl_single_url_for_result(
@@ -316,13 +614,16 @@ async def _crawl_batch_for_results(
                 return await process_single_url(idx, url)
             except Exception as e:
                 return idx, {
-                    'url': url,
-                    'success': False,
-                    'error': str(e),
-                    'error_code': 'crawl_failed',
+                    "url": url,
+                    "success": False,
+                    "error": str(e),
+                    "error_code": "crawl_failed",
                 }
 
-    tasks = [asyncio.create_task(process_with_semaphore(i, url)) for i, url in enumerate(urls)]
+    tasks = [
+        asyncio.create_task(process_with_semaphore(i, url))
+        for i, url in enumerate(urls)
+    ]
     for completed in asyncio.as_completed(tasks):
         idx, payload = await completed
         processed_results[idx] = payload
@@ -335,18 +636,18 @@ async def _crawl_batch_for_results(
     return processed_results
 
 
-async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
+async def _process_batch(urls: List[str], browser_pool) -> List[Optional[dict]]:
     """处理一批URL：先爬取，再写入 SQLite。"""
     processed_results = await _crawl_batch_for_results(urls, browser_pool)
 
     articles_to_add = []
     read_counts_to_add = []
     for item in processed_results:
-        if item and item.get('success'):
+        if item and item.get("success"):
             articles_to_add.append(
-                (item.get('url'), item['data'].get('title'), item['data'].get('site'))
+                (item.get("url"), item["data"].get("title"), item["data"].get("site"))
             )
-            read_counts_to_add.append((item['data'].get('read_count', 0),))
+            read_counts_to_add.append((item["data"].get("read_count", 0),))
 
     if not articles_to_add:
         return processed_results
@@ -381,12 +682,11 @@ async def _process_batch(urls: List[str], browser_pool) -> List[dict]:
 
     article_idx = 0
     for result in processed_results:
-        if result.get('success') and article_idx < len(article_ids):
-            result['data']['id'] = article_ids[article_idx]
-            result['data']['initial_count'] = result['data'].get('read_count', 0)
+        if result and result.get("success") and article_idx < len(article_ids):
+            result["data"]["id"] = article_ids[article_idx]
+            result["data"]["initial_count"] = result["data"].get("read_count", 0)
             article_idx += 1
 
-    logger.info(f"批量插入成功: {len(articles_to_add)} 篇文章")
+    logger.info("批量插入 %s 篇文章", len(articles_to_add))
 
     return processed_results
-
